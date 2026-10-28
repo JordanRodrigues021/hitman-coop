@@ -1,0 +1,10 @@
+/_deps/
+/_build/
+/_dist/
+/core/build*/
+/ref/
+/local/
+.vs/
+*.user
+__pycache__/
+*.pyc

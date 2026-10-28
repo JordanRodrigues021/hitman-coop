@@ -1,0 +1,60 @@
+name: Build
+
+on:
+    push:
+    pull_request:
+    workflow_dispatch:
+
+jobs:
+    core-tests:
+        name: Core tests
+        runs-on: windows-2022
+        steps:
+            -   uses: actions/checkout@v4
+
+            -   name: Build core and tests
+                run: |
+                    cmake -S core -B core/build -G "Visual Studio 17 2022" -A x64
+                    cmake --build core/build --config Release
+
+            -   name: Run tests
+                run: core/build/Release/coop_tests.exe
+
+            -   name: Relay server tests
+                run: python -I server/test_relay.py
+
+    mod:
+        name: Mod and installer
+        runs-on: windows-2022
+        needs: core-tests
+        steps:
+            -   uses: actions/checkout@v4
+
+            -   name: Fetch pinned ZHMModSDK v4.1.1 (SHA-256 checked)
+                shell: pwsh
+                run: ./tools/fetch-sdk.ps1
+
+            -   name: Configure
+                run: cmake -S . -B _build -G "Visual Studio 17 2022" -A x64 -DZHMMODSDK_DEVPKG_DIR="${{ github.workspace }}/_deps/devpkg"
+
+            -   name: Build
+                run: cmake --build _build --config RelWithDebInfo
+
+            -   name: Install
+                run: cmake --install _build --config RelWithDebInfo --prefix _build/install
+
+            -   name: Check the DLL against the shipped SDK
+                shell: pwsh
+                run: ./tools/check-dll.ps1
+
+            -   name: Package
+                shell: pwsh
+                run: ./tools/package.ps1
+
+            -   uses: actions/upload-artifact@v4
+                with:
+                    name: HitmanCoop
+                    path: |
+                        _dist/*.zip
+                        _dist/*.exe
+                        _dist/*.sha256
