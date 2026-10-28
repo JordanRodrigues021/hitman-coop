@@ -12,6 +12,9 @@ dies, who is knocked out, who is alerted, where they walk), doors and items are 
 everything you need to work as a team: marks, chat, signals, a radar, a ready check and a 3-2-1
 countdown for the perfect double hit.
 
+> ❤️ **HITMAN Co-op is free, and made by one young developer.** If it gives you and a friend a great
+> night, please consider [supporting me](#support-the-developer). Even a small tip makes my day.
+
 ---
 
 ## Contents
@@ -27,6 +30,7 @@ countdown for the perfect double hit.
 - [Run your own co-op server](#run-your-own-co-op-server)
 - [Troubleshooting](#troubleshooting)
 - [Build from source](#build-from-source)
+- [❤️ Support the developer](#support-the-developer)
 - [Credits and licence](#credits-and-licence)
 
 ---
@@ -239,6 +243,63 @@ cmake --build core/build --config Release
 core/build/Release/coop_tests.exe
 python -I server/test_relay.py
 ```
+
+## Support the developer
+
+Hi, I'm **Jordan**, a young developer from India. 👋
+
+HITMAN Co-op is my baby. I built every part of it myself: the networking, the shared NPCs, the
+overlay, the installer, the co-op server. Countless late nights went into making two copies of a
+game that was never designed for multiplayer agree on every guard, every body and every door. I'm
+genuinely proud of what it has become, and I give it to you for free: no ads, no paywalls, no
+studio, no company. Just me.
+
+The thing is, I do this alone. There's no team to fall back on and no money coming in for it.
+Every time the game updates and something breaks, it's me sitting down to find out why and fix it.
+Every new feature is me building and testing it by hand.
+
+**If HITMAN Co-op gave you and a friend even one great evening of sneaking around together, please
+think about sending a small tip.** It doesn't have to be much: the price of a coffee means more to
+me than you'd imagine. It tells me that something I made with my own hands is out there making
+people happy, and it's what keeps me going and keeps this mod alive.
+
+### 🇮🇳 From India: UPI (instant, free)
+
+<p>
+  <img src="docs/upi-qr.png" alt="UPI QR code" width="200"><br>
+  Scan with any UPI app (Google Pay, PhonePe, Paytm, BHIM...) or pay to:<br>
+  <b><code>jordanrodrigues021@okhdfcbank</code></b>
+</p>
+
+### 🌍 From anywhere in the world: Steam gift cards
+
+Steam converts gift cards from any country, so this works wherever you are.
+
+1. **Add me on Steam**: friend code **`1300893237`**
+   (Steam, then *Friends*, then *Add a Friend*), or use my
+   [quick invite link](https://s.team/p/gtmp-bvfh/JJRCJJDJ).
+2. **Send a Steam Digital Gift Card** of any amount: in the Steam store, open
+   [Digital Gift Cards](https://store.steampowered.com/digitalgiftcards/), pick an amount and choose me
+   as the recipient. Steam may ask you to be friends for a few days before it lets you send one.
+
+### 🎁 Amazon gift cards
+
+Send an **Amazon India (amazon.in) e-gift card** by email to
+**[jordanrodrigues021@gmail.com](mailto:jordanrodrigues021@gmail.com)**: at checkout, enter that
+address as the recipient and Amazon delivers it to me. Please use **amazon.in**; gift cards from
+other Amazon stores usually can't be used in India. Add a note with your name and I'll thank you
+personally.
+
+### 💬 Any other way
+
+Want to support me some other way? Email me at
+**[jordanrodrigues021@gmail.com](mailto:jordanrodrigues021@gmail.com)** or message me on Steam and
+we'll work it out. I'm open to it.
+
+**Can't donate? That's completely okay.** ⭐ **Star this repository**, tell a friend, share a clip of
+your co-op run, or report a bug. Every bit of it helps a small developer more than you know.
+
+Thank you, truly. 🙏
 
 ## Credits and licence
 
