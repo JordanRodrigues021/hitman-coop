@@ -577,6 +577,13 @@ int RunBot(const std::string& p_Address, const std::string& p_CommandFile) {
             s_Session.SetLocalPlayerState(s_State);
             Log("Away (tabbed out), colour green.");
         }
+        else if (p_Command.rfind("hold", 0) == 0) {
+            // hold <repository id>: the bot's 47 has that item in hand (the host's stand-in should too).
+            MsgPlayerState s_State;
+            s_State.heldItem = p_Command.size() > 5 ? p_Command.substr(5) : std::string();
+            s_Session.SetLocalPlayerState(s_State);
+            Log("Holding '%s'.", s_State.heldItem.c_str());
+        }
         else if (p_Command == "ping") {
             s_Session.SendMissionEvent("Coop_Ping", "");
             Log("Asked where the host is.");
@@ -645,6 +652,8 @@ int RunBot(const std::string& p_Address, const std::string& p_CommandFile) {
         }
     };
 
+    size_t s_PeerItemsSeen = 0;
+
     while (!s_Quit) {
         const double s_Now = Now();
         const float s_Dt = static_cast<float>(s_Now - s_Last);
@@ -676,6 +685,15 @@ int RunBot(const std::string& p_Address, const std::string& p_CommandFile) {
                     Command(s_Cmd);
                 }
             }
+        }
+
+        // Bodies the host moved or put away.
+        for (; s_PeerItemsSeen < s_World.peerItems.size(); ++s_PeerItemsSeen) {
+            const auto& s_Item = s_World.peerItems[s_PeerItemsSeen];
+
+            if (s_Item.flags & ItemFlag_Body)
+                Log("Host's body %016llx %s at (%.2f, %.2f, %.2f).", static_cast<unsigned long long>(s_Item.id),
+                    (s_Item.flags & ItemFlag_BodyHidden) ? "put away" : "moved", s_Item.xf.pos.x, s_Item.xf.pos.y, s_Item.xf.pos.z);
         }
 
         // What the host's game reports alert (its own NPCs' alert levels).

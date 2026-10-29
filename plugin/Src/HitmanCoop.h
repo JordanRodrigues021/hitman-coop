@@ -86,6 +86,7 @@ private:
     DECLARE_PLUGIN_DETOUR(HitmanCoop, bool, OnTryOpenMenu, ZGameUIManagerEntity* th, EGameUIMenu p_Menu, bool p_Force);
     std::atomic<int> m_LevelState { -1 };
     int m_LevelStateTold = -1;
+    std::string m_PartnerHeldTold; // the partner's item in hand, as last given to the stand-in
     std::atomic<int> m_LastMenu { -1 };
     void UpdateLoadStage(double p_Now);
     // Our game's window in front or not (the game's own notice): the partner sees us as away.

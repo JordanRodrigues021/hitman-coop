@@ -29,6 +29,8 @@ countdown for the perfect double hit.
 - [Joining over the internet](#joining-over-the-internet)
 - [Run your own co-op server](#run-your-own-co-op-server)
 - [Troubleshooting](#troubleshooting)
+- [FAQ](#faq)
+- [What's new](#whats-new)
 - [Build from source](#build-from-source)
 - [❤️ Support the developer](#support-the-developer)
 - [Credits and licence](#credits-and-licence)
@@ -40,10 +42,13 @@ countdown for the perfect double hit.
 **A shared mission**
 - Your partner's 47 in your game, animated with their exact movements (their whole skeleton pose,
   30 times a second), wearing their disguise.
-- Shared NPCs: kills, knock-outs (by any means), alert levels, bodies being dragged, and NPCs walking
-  where they walk in your partner's game.
+- Shared NPCs: kills, knock-outs (by any means), alert levels, and NPCs walking where they walk in
+  your partner's game. An NPC your partner has hold of stops reacting in your game, so a guard you
+  both take down at the same moment doesn't see the other takedown.
+- Shared bodies: a body your partner drags away or hides in a closet or container is hidden in your
+  game too, so your guards don't find it.
 - Shared doors and items: what your partner picks up disappears for you; what they drop or throw
-  lands where it lands.
+  lands where it lands. What your partner holds shows in their stand-in's hand.
 - Pause together, restart together, and start together (your mission waits while your partner's
   game is still loading in).
 - Your partner's stand-in is invisible to the AI and can't be hurt: their own game decides what
@@ -218,8 +223,32 @@ Then both players type `your.server.address:47100` as the co-op server in Settin
 - **Can't connect by IP**: the host's firewall or router blocks UDP 47047. Use a join code,
   Tailscale, or forward the port.
 - **"Co-op can't run on this game version"**: the game was updated; get the matching HITMAN Co-op release.
+- **"You are in a different mission" / "different difficulties"**: both players start the same
+  mission on the same difficulty. (Since 0.12.0, two PCs with different CPUs no longer count as
+  different missions in New York, Whittleton Creek and other HITMAN 2 locations.)
 - **Something went wrong**: open About and click **Copy diagnostics** (it contains no IP addresses),
-  and attach `Retail\mods\HitmanCoop.log` to an issue.
+  and attach `Retail\mods\HitmanCoop.log` to an issue. If the game crashed, attach
+  `Retail\mods\HitmanCoop-crash.txt` too.
+
+## FAQ
+
+**Does it trigger anti-cheat or get me banned?** HITMAN doesn't use an anti-cheat system like
+EasyAntiCheat or BattlEye. HITMAN Co-op runs through ZHMModSDK, the standard HITMAN mod loader, and
+doesn't change or replace any game files. It's still a mod, so read the [disclaimer](DISCLAIMER.md).
+
+**Does it break the always-online features?** No. The mod never talks to IO Interactive's servers:
+co-op runs over its own connection (Tailscale, LAN or a join code), and your game logs in as usual.
+It also works with the game in offline mode. If you're worried about your online profile or
+leaderboards, play co-op offline.
+
+**Do I need Peacock?** No. It works with the official servers or offline. It hasn't been tested
+together with Peacock.
+
+## What's new
+
+**0.12.0**: fixes for the first players' reports: New York and Whittleton Creek main missions,
+dragged and hidden bodies, crashes on restart, double takedowns being witnessed, and invisible items
+in your partner's hands. See the [changelog](CHANGELOG.md) for every version.
 
 ## Build from source
 

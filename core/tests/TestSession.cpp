@@ -138,6 +138,38 @@ TEST(Session_WrongMissionIsNotSynced) {
     CHECK(HasNote(d.clientWorld, "any mission in Paris"));
 }
 
+// The same mission, each PC with its own simulation quality brick (a 6-core and an 8-core CPU).
+TEST(Session_MachineBricksStillSync) {
+    const std::string s_Dir = "assembly:/_pro/scenes/missions/skunk/";
+    const SceneDesc s_Host { s_Dir + "scene_skunk.entity", { s_Dir + "mission_skunk.brick", s_Dir + "intel_8core_skunk.brick" }, "Skunk" };
+    const SceneDesc s_Client { s_Dir + "scene_skunk.entity", { s_Dir + "intel_6core_skunk.brick", s_Dir + "mission_skunk.brick" }, "Skunk" };
+    Duo d(18);
+    d.HostLoads(s_Host, 4);
+    d.Start();
+    d.ClientLoads(s_Client, 4, 0.f);
+    CHECK(d.StepUntilSynced(2.0));
+    CHECK(!HasNote(d.clientWorld, "different mission"));
+
+    // Already the host's mission: a client starting it isn't sent anywhere.
+    SceneDesc s_Out;
+    CHECK(!d.client.RedirectFor(s_Client, s_Out));
+    CHECK(LocationDisplayName(s_Host.Location()) == "Whittleton Creek");
+}
+
+TEST(Session_DifferentDifficultyIsTold) {
+    SceneDesc s_Master = c_Paris;
+    s_Master.bricks.push_back("assembly:/_pro/scenes/missions/paris/difficulty_pro1_paris_fashionshow.brick");
+    Duo d(19);
+    d.HostLoads(c_Paris, 4);
+    d.Start();
+    d.ClientLoads(s_Master, 4, 0.f);
+    d.Step(2.0);
+
+    CHECK(!d.host.Synced() && !d.client.Synced());
+    CHECK(HasNote(d.clientWorld, "different difficulties"));
+    CHECK(HasNote(d.hostWorld, "different difficulty"));
+}
+
 TEST(Scene_LocationFromScenePath) {
     CHECK(c_Miami.Location() == "miami");
     CHECK(c_Sapienza.Location() == "coastaltown");

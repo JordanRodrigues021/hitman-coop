@@ -628,6 +628,9 @@ void Session::HandleMessage(const Message& p_Msg, double p_Now) {
                         m_World.Notify(m_PeerName + " is in " + LocationDisplayName(m_PeerScene.Location()) + " and you are in " +
                             LocationDisplayName(s_Mine.Location()) + ". Pick a location you both own.");
                     }
+                    else if (m_PeerScene.DiffersInDifficulty(s_Mine)) {
+                        m_World.Notify(m_PeerName + " started this mission on a different difficulty. They have to start it again on yours.");
+                    }
                 }
 
                 break;
@@ -1013,7 +1016,11 @@ void Session::UpdateScene() {
             const SceneDesc s_Mine = m_World.CurrentScene();
             const std::string s_There = LocationDisplayName(m_HostScene.Location());
 
-            if (s_Mine.SameLocationAs(m_HostScene)) {
+            if (s_Mine.DiffersInDifficulty(m_HostScene)) {
+                m_World.Notify("You and " + m_PeerName + " picked different difficulties. Go back to the menu and start the mission "
+                    "again on the same difficulty as them.");
+            }
+            else if (s_Mine.SameLocationAs(m_HostScene)) {
                 m_World.Notify("You are in a different mission from " + m_PeerName + ". Go back to the menu and start any mission in " +
                     s_There + " to follow them.");
             }

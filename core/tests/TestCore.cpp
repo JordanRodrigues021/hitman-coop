@@ -184,7 +184,11 @@ TEST(Protocol_RoundTripAll) {
         m.stats.challenges = 65535;
         m.colour = 0x3080FF;
         m.flags |= PlayerFlag_Away;
-        CHECK(Decode(Encode(m), o) && o == m);
+        m.heldItem = "73875794-5A86-410E-84A4-1B5B2F7E5A54";
+        CHECK(Decode(Encode(m), o) && o == m && o.heldItem == m.heldItem);
+        m.heldItem = std::string(65, 'x'); // longer than any repository id
+        CHECK(!Decode(Encode(m), o));
+        m.heldItem.clear();
         m.colour = 0x1000000;
         CHECK(!Decode(Encode(m), o));
         m.colour = 0;
@@ -290,6 +294,41 @@ TEST(Protocol_SceneCompareIgnoresCase) {
     CHECK(a.SameAs(b));
     b.bricks.push_back("extra");
     CHECK(!a.SameAs(b));
+}
+
+// New York, Whittleton Creek and others add a brick for the PC's core count: two PCs with
+// different CPUs are still in the same mission (both were told they weren't, 0.11.0).
+TEST(Protocol_SceneCompareIgnoresMachineBricks) {
+    const std::string s_Mission = "assembly:/_PRO/scenes/missions/skunk/mission_skunk.brick";
+    SceneDesc a { "assembly:/_pro/scenes/missions/skunk/scene_skunk.entity",
+        { s_Mission, "assembly:/_pro/scenes/missions/skunk/intel_8core_skunk.brick" }, "Skunk" };
+    SceneDesc b { "assembly:/_pro/scenes/missions/skunk/scene_skunk.entity", { s_Mission }, "Skunk" };
+    CHECK(a.SameAs(b) && b.SameAs(a));
+
+    b.bricks.push_back("assembly:/_pro/scenes/missions/skunk/intel_6core_skunk.brick");
+    CHECK(a.SameAs(b));
+    CHECK(SceneDesc::IsMachineBrick("assembly:/_pro/scenes/missions/miami/scenario_flamingo_intel_6cores.brick"));
+    CHECK(SceneDesc::IsMachineBrick("assembly:/_pro/scenes/missions/Greedy/mission_raccoon/intel_8core_racoon.brick"));
+    CHECK(!SceneDesc::IsMachineBrick(s_Mission));
+    CHECK(!SceneDesc::IsMachineBrick("assembly:/_pro/scenes/missions/x/intel_core.brick"));
+    CHECK(!SceneDesc::IsMachineBrick("assembly:/_pro/intel_8core/mission.brick")); // only the file name counts
+
+    // Order doesn't matter either; another mission brick does.
+    SceneDesc c { a.scene, { "y.brick", "x.brick" }, "" };
+    SceneDesc d { a.scene, { "X.brick", "y.brick" }, "" };
+    CHECK(c.SameAs(d));
+    d.bricks.push_back("z.brick");
+    CHECK(!c.SameAs(d) && !c.DiffersInDifficulty(d));
+}
+
+TEST(Protocol_SceneDifficultyDifference) {
+    const std::string s_Scene = "assembly:/_pro/scenes/missions/Greedy/mission_raccoon/scene_raccoon_basic.entity";
+    const std::string s_Mission = "assembly:/_pro/scenes/missions/Greedy/mission_raccoon/mission_raccoon.brick";
+    SceneDesc s_Normal { s_Scene, { s_Mission }, "Raccoon" };
+    SceneDesc s_Master { s_Scene, { s_Mission, "assembly:/_pro/scenes/missions/Greedy/mission_raccoon/difficulty_hard_raccoon.brick" }, "Raccoon" };
+    CHECK(!s_Normal.SameAs(s_Master));
+    CHECK(s_Normal.DiffersInDifficulty(s_Master) && s_Master.DiffersInDifficulty(s_Normal));
+    CHECK(!s_Normal.DiffersInDifficulty(s_Normal));
 }
 
 template <class T>

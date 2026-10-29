@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 #include <malloc.h>
+#include <sstream>
 
 #include "Functions.h"
 #include "Globals.h"
@@ -34,6 +35,8 @@
 #include <Glacier/ZCollision.h>
 #include <Glacier/ZApplicationEngineWin32.h>
 #include <Glacier/ZContentKitManager.h>
+#include <Glacier/ZDelegate.h>
+#include <Glacier/EDynamicEntityType.h>
 #include <Glacier/ZHitman5.h>
 #include <Glacier/ZModule.h>
 #include <Glacier/ZOutfit.h>
@@ -117,6 +120,8 @@ void SdkWorld::OnSceneCleared() {
     GamePause::Forget();
     CrashGuards::ClearPuppets();
     m_PendingPuppets.clear();
+    m_SessionPuppets.clear();
+    m_RemoteVictimStilled = false;
     PoseHook::SetWatched({});
     m_RigBones = 0;
     m_RigHidden = false;
@@ -138,9 +143,17 @@ void SdkWorld::OnSceneCleared() {
     g_Pacified.clear();
     m_Marks.clear();
     m_PartnerWantsPause = false;
+    m_RestartAskedAt = -1.0;
     m_HasPartnerSentXf = false;
     m_Items.clear();
     m_PeerHeldItems.clear();
+    m_Bodies.clear();
+    // The scene owns the copy in the stand-in's hand and frees it with the stand-in.
+    m_StandInItem = {};
+    m_StandInItemShown.clear();
+    m_StandInItemTicket = 0;
+    m_StandInItemAskedAt = -1.0;
+    m_HeldItem.clear();
     m_Doors.clear();
     m_DoorsFound = false;
     m_DoorsSearchAt = 0.0;
@@ -521,6 +534,8 @@ void SdkWorld::UpdatePoses() {
     void* s_Source = nullptr;
     void* s_Target = nullptr;
 
+    UpdateStandInItem();
+
     if (m_InScene) {
         if (auto s_Player = SDK()->GetLocalPlayer())
             s_Source = s_Player.m_pInterfaceRef->m_pMorphemeEntity.m_entityRef.QueryInterface<IBoneAnimator>();
@@ -841,6 +856,18 @@ void SdkWorld::ShowRemoteVictim(uint64_t p_Id, const coop::Transform& p_Xf, cons
         m_RemoteVictimRig = 0;
         m_RemoteVictimDowned = m_HeldDown.count(p_Id) != 0;
         m_RemoteVictimDragged = false;
+        m_RemoteVictimStilled = false;
+
+        // In the partner's hands, it reacts to nothing here: a guard both players take down at
+        // once otherwise saw our own takedown first and raised the alarm. Its AI comes back when
+        // the partner lets go (or for the game's own knock-out, see PacifyForPartner).
+        if (!ActorDown(s_Actor) && m_Now - m_SceneReadyAt > 3.0) {
+            CrashGuards::SetPuppet(s_Actor, true);
+            m_RemoteVictimStilled = true;
+
+            if (m_Trace)
+                m_Trace("victim: " + std::string(s_Actor->m_sActorName.c_str()) + " held still for the partner");
+        }
     }
 
     m_RemoteVictimFlags = p_Flags;
@@ -928,6 +955,14 @@ void SdkWorld::ReleaseRemoteVictim() {
 
     if (m_Trace)
         m_Trace("victim: released " + std::string(s_Actor->m_sActorName.c_str()) + " flags " + std::to_string(m_RemoteVictimFlags));
+
+    if (m_RemoteVictimStilled && !m_SessionPuppets.contains(m_RemoteVictimId))
+        CrashGuards::SetPuppet(s_Actor, false);
+
+    // Left by the partner where their stream put it: not ours to tell them about.
+    AgreeBody(m_RemoteVictimId, s_Actor);
+
+    m_RemoteVictimStilled = false;
 
     // Already put down here: a body dragged keeps the pose it was left in, one that fell stays
     // where it fell.
@@ -2068,6 +2103,44 @@ void SdkWorld::RestartMission() {
     if (!m_InScene)
         return;
 
+    // Not at once: this comes in with the partner's messages, at any moment. Restarting while our
+    // own restart or load was under way, or with our pause for the partner still held, crashed the
+    // game (players' reports, 0.11.0).
+    if (m_RestartAskedAt < 0.0)
+        m_RestartAskedAt = m_Now;
+}
+
+void SdkWorld::UpdateRestart(bool p_Playing) {
+    if (m_RestartAskedAt < 0.0)
+        return;
+
+    // Our mission was cleared meanwhile (our own restart, or a load): that one does instead.
+    if (!m_InScene) {
+        m_RestartAskedAt = -1.0;
+
+        if (m_Trace)
+            m_Trace("restart: for the partner, left out (our mission is reloading already)");
+
+        return;
+    }
+
+    if (m_Now - m_RestartAskedAt > 60.0) {
+        m_RestartAskedAt = -1.0;
+        Notify("Your partner restarted the mission: restart yours from the pause menu.");
+        return;
+    }
+
+    if (!p_Playing || m_Now - m_SceneReadyAt < 2.0)
+        return;
+
+    // Their pause menu, which they restarted from, held ours: let go first, restart a frame later.
+    if (m_PartnerWantsPause || GamePause::Holding()) {
+        m_PartnerWantsPause = false;
+        GamePause::SetPartnerPause(false);
+        return;
+    }
+
+    m_RestartAskedAt = -1.0;
     m_RestartForPartner = true;
 
     if (!GamePause::Restart()) {
@@ -2087,6 +2160,11 @@ void SdkWorld::SetNpcPuppet(uint64_t p_Id, bool p_Puppet) {
 
     m_PendingPuppets.erase(p_Id);
 
+    if (p_Puppet)
+        m_SessionPuppets.insert(p_Id);
+    else
+        m_SessionPuppets.erase(p_Id);
+
     if (ZActor* s_Actor = FindNpc(p_Id))
         CrashGuards::SetPuppet(s_Actor, p_Puppet);
 }
@@ -2095,9 +2173,15 @@ void SdkWorld::ApplyPendingPuppets() {
     if (m_PendingPuppets.empty() || m_Now - m_SceneReadyAt < 3.0)
         return;
 
-    for (const auto& [s_Id, s_Puppet] : m_PendingPuppets)
+    for (const auto& [s_Id, s_Puppet] : m_PendingPuppets) {
+        if (s_Puppet)
+            m_SessionPuppets.insert(s_Id);
+        else
+            m_SessionPuppets.erase(s_Id);
+
         if (ZActor* s_Actor = FindNpc(s_Id))
             CrashGuards::SetPuppet(s_Actor, s_Puppet);
+    }
 
     if (m_Trace)
         m_Trace("shared NPCs: " + std::to_string(CrashGuards::PuppetCount()) + " run by the partner's game (puppets here)");
@@ -2246,6 +2330,7 @@ void SdkWorld::CollectItemChanges(std::vector<coop::ItemChange>& p_Out) {
 
     m_NextItemScan = m_Now + 0.1;
     CollectDoorChanges(p_Out);
+    CollectBodyChanges(p_Out);
     const auto s_Player = SDK()->GetLocalPlayer();
 
     if (!s_Player)
@@ -2318,6 +2403,11 @@ void SdkWorld::ApplyPeerItem(const coop::ItemChange& p_Change) {
         return;
     }
 
+    if (p_Change.flags & coop::ItemFlag_Body) {
+        ApplyPeerBody(p_Change);
+        return;
+    }
+
     ZEntityRef s_Ref;
     ZHM5Item* s_Item = FindItem(p_Change.id, s_Ref);
 
@@ -2347,6 +2437,359 @@ void SdkWorld::ApplyPeerItem(const coop::ItemChange& p_Change) {
 
     if (auto* s_Spatial = s_Ref.QueryInterface<ZSpatialEntity>())
         s_Spatial->SetObjectToWorldMatrixFromEditor(ToMatrix(p_Change.xf));
+}
+
+namespace {
+bool ActorTransform(ZActor* p_Actor, coop::Transform& p_Out) {
+    ZEntityRef s_Ref;
+    p_Actor->GetID(s_Ref);
+
+    if (const auto* s_Spatial = s_Ref.QueryInterface<ZSpatialEntity>()) {
+        p_Out = SdkWorld::ToTransform(s_Spatial->GetObjectToWorldMatrix());
+        return true;
+    }
+
+    return false;
+}
+}
+
+void SdkWorld::AgreeBody(uint64_t p_Id, ZActor* p_Actor) {
+    coop::Transform s_Xf;
+
+    if (!p_Actor || !ActorTransform(p_Actor, s_Xf))
+        return;
+
+    auto& s_Body = m_Bodies[p_Id];
+    s_Body.agreed = s_Body.last = s_Xf.pos;
+    s_Body.stillSince = m_Now;
+}
+
+void SdkWorld::CollectBodyChanges(std::vector<coop::ItemChange>& p_Out) {
+    if (m_NpcsById.empty())
+        return;
+
+    for (const auto& [s_Id, s_Actor] : m_NpcsById) {
+        coop::Transform s_Xf;
+
+        if (!s_Actor || !ActorDown(s_Actor) || !ActorTransform(s_Actor, s_Xf))
+            continue;
+
+        const auto [s_It, s_New] = m_Bodies.try_emplace(s_Id);
+        auto& s_Body = s_It->second;
+
+        if (s_New) {
+            s_Body.downAt = m_Now;
+            s_Body.hidden = s_Actor->m_bBodyHidden;
+        }
+
+        // Where it fell, in each game its own way (a fall takes a few seconds): nothing to tell. The
+        // partner's victim moves with their stream.
+        if (m_Now - s_Body.downAt < 4.0 || s_Actor == m_RemoteVictim) {
+            s_Body.agreed = s_Body.last = s_Xf.pos;
+            s_Body.stillSince = m_Now;
+            continue;
+        }
+
+        if (coop::Distance(s_Xf.pos, s_Body.last) > 0.05f) {
+            s_Body.last = s_Xf.pos;
+            s_Body.stillSince = m_Now;
+        }
+
+        if (s_Actor->m_bIsBeingDragged || s_Actor->m_bIsBeingDumped)
+            continue;
+
+        const bool s_Hidden = s_Actor->m_bBodyHidden;
+        // More than a nudge (walking into a body shifts it a little), and at rest for a moment.
+        const bool s_Moved = coop::Distance(s_Xf.pos, s_Body.agreed) > 1.5f && m_Now - s_Body.stillSince > 0.6;
+
+        if (s_Hidden == s_Body.hidden && !s_Moved)
+            continue;
+
+        s_Body.hidden = s_Hidden;
+        s_Body.agreed = s_Xf.pos;
+        p_Out.push_back({ s_Id, static_cast<uint8_t>(coop::ItemFlag_Body | (s_Hidden ? coop::ItemFlag_BodyHidden : 0)), s_Xf });
+
+        if (m_Trace)
+            m_Trace(std::string("body: ") + s_Actor->m_sActorName.c_str() + (s_Hidden ? " put away" : " moved") + ", told to the partner");
+    }
+
+    // A body the game took out of the mission (disabled) after it was put away somewhere.
+    for (auto& [s_Id, s_Body] : m_Bodies) {
+        if (s_Body.gone || s_Body.hidden || m_NpcsById.contains(s_Id))
+            continue;
+
+        for (const auto& s_Entry : Globals::ActorManager->m_activatedActors) {
+            if (s_Entry.m_pInterfaceRef && !s_Entry.m_pInterfaceRef->m_bEnabled && s_Entry.m_entityRef &&
+                s_Entry.m_entityRef->GetType() && s_Entry.m_entityRef->GetType()->m_nEntityID == s_Id) {
+                s_Body.gone = s_Body.hidden = true;
+                coop::Transform s_Where;
+                s_Where.pos = s_Body.agreed;
+                p_Out.push_back({ s_Id, static_cast<uint8_t>(coop::ItemFlag_Body | coop::ItemFlag_BodyHidden), s_Where });
+                break;
+            }
+        }
+    }
+}
+
+void SdkWorld::ApplyPeerBody(const coop::ItemChange& p_Change) {
+    ZActor* s_Actor = FindNpc(p_Change.id);
+
+    // In our 47's hands right now, or not a body here (yet).
+    if (!s_Actor || s_Actor == m_LocalVictim || !ActorDown(s_Actor) || s_Actor->m_bIsBeingDragged || s_Actor->m_bIsBeingDumped)
+        return;
+
+    // At rest there: the partner has let go of it.
+    if (s_Actor == m_RemoteVictim)
+        ReleaseRemoteVictim();
+
+    // Hidden with the game's own flag for a body in a closet or a container, so no NPC here finds
+    // it, and out of sight.
+    ZEntityRef s_Ref;
+    s_Actor->GetID(s_Ref);
+    s_Actor->m_bBodyHidden = true;
+    s_Ref.SetProperty("m_bVisible", false);
+
+    AgreeBody(p_Change.id, s_Actor);
+    auto& s_Body = m_Bodies[p_Change.id];
+    s_Body.hidden = true;
+
+    if (m_Trace)
+        m_Trace(std::string("body: ") + s_Actor->m_sActorName.c_str() +
+            ((p_Change.flags & coop::ItemFlag_BodyHidden) ? " put away" : " moved") + " by the partner, hidden here");
+}
+
+std::string SdkWorld::BodyTest(const std::string& p_Arg) {
+    // body | body move | body hide: the nearest body, and the partner's word about it.
+    coop::Transform s_Local;
+
+    if (!GetLocalAvatar(s_Local))
+        return "body: no 47";
+
+    ZActor* s_Best = nullptr;
+    uint64_t s_BestId = 0;
+    float s_BestD = 30.f;
+    coop::Transform s_BestXf;
+
+    for (const auto& [s_Id, s_Actor] : m_NpcsById) {
+        coop::Transform s_Xf;
+
+        if (s_Actor && ActorDown(s_Actor) && ActorTransform(s_Actor, s_Xf))
+            if (const float s_D = coop::Distance(s_Xf.pos, s_Local.pos); s_D < s_BestD) {
+                s_Best = s_Actor;
+                s_BestId = s_Id;
+                s_BestD = s_D;
+                s_BestXf = s_Xf;
+            }
+    }
+
+    if (!s_Best)
+        return "body: none within 30 m";
+
+    char s_Text[256];
+    std::snprintf(s_Text, sizeof(s_Text), "%s at (%.2f, %.2f, %.2f), %.1f m: dead=%d dragged=%d dumped=%d hidden=%d", s_Best->m_sActorName.c_str(),
+        s_BestXf.pos.x, s_BestXf.pos.y, s_BestXf.pos.z, s_BestD, s_Best->IsDead() ? 1 : 0, s_Best->m_bIsBeingDragged ? 1 : 0,
+        s_Best->m_bIsBeingDumped ? 1 : 0, s_Best->m_bBodyHidden ? 1 : 0);
+
+    // As the partner's word: it moved (or was put away) there.
+    if (p_Arg == "move" || p_Arg == "hide")
+        ApplyPeerBody({ s_BestId, static_cast<uint8_t>(coop::ItemFlag_Body | (p_Arg == "hide" ? coop::ItemFlag_BodyHidden : 0)), s_BestXf });
+
+    return std::string("body: ") + s_Text;
+}
+
+namespace {
+// Our 47's item in hand: of the items it owns, the one being drawn. Items in its pockets are owned
+// but not drawn (their geometry hidden).
+ZHM5Item* HeldBy(const ZEntityRef& p_Owner, ZEntityRef* p_Ref = nullptr) {
+    ZHM5Item* s_Held = nullptr;
+
+    ForEachSceneItem([&](uint64_t, ZHM5Item* p_Item, const ZEntityRef& p_ItemRef) {
+        if (s_Held || p_Item->m_pOwner != p_Owner || !p_Item->m_rGeomentity.m_entityRef || !p_Item->m_pItemConfigDescriptor)
+            return;
+
+        if (p_Item->m_rGeomentity.m_entityRef.GetProperty<bool>("m_bVisible").Get()) {
+            s_Held = p_Item;
+
+            if (p_Ref)
+                *p_Ref = p_ItemRef;
+        }
+    });
+
+    return s_Held;
+}
+}
+
+std::string SdkWorld::LocalHeldItem() const {
+    // A few times a second: it walks the level's items.
+    if (m_Now < m_HeldCheckAt)
+        return m_HeldItem;
+
+    m_HeldCheckAt = m_Now + 0.25;
+    m_HeldItem.clear();
+    const auto s_Player = SDK()->GetLocalPlayer();
+
+    if (m_InScene && s_Player)
+        if (const ZHM5Item* s_Item = HeldBy(s_Player.m_entityRef))
+            m_HeldItem = s_Item->m_pItemConfigDescriptor->m_ItemID.ToString().c_str();
+
+    return m_HeldItem;
+}
+
+std::string SdkWorld::HeldItemsTest() const {
+    coop::Transform s_Local;
+    const auto s_Player = SDK()->GetLocalPlayer();
+
+    if (!GetLocalAvatar(s_Local) || !s_Player)
+        return "held: no 47";
+
+    std::string s_Out;
+    int s_Count = 0;
+
+    ForEachSceneItem([&](uint64_t p_Id, ZHM5Item* p_Item, const ZEntityRef& p_Ref) {
+        if (p_Item->m_pOwner != s_Player.m_entityRef)
+            return;
+
+        const auto* s_Spatial = p_Ref.QueryInterface<ZSpatialEntity>();
+        const coop::Transform s_Xf = s_Spatial ? ToTransform(s_Spatial->GetObjectToWorldMatrix()) : coop::Transform {};
+        const bool s_Geom = p_Item->m_rGeomentity.m_entityRef && p_Item->m_rGeomentity.m_entityRef.GetProperty<bool>("m_bVisible").Get();
+        const bool s_Visible = p_Item->m_rItemVisible.m_entityRef && p_Item->m_rItemVisible.m_entityRef.GetProperty<bool>("m_bValue").Get();
+        char s_Line[320];
+        std::snprintf(s_Line, sizeof(s_Line), " | %s [%s] geom=%d visible=%d at %.2f m (dz %.2f)",
+            p_Item->m_pItemConfigDescriptor ? p_Item->m_pItemConfigDescriptor->m_sTitle.c_str() : "?",
+            p_Item->m_pItemConfigDescriptor ? p_Item->m_pItemConfigDescriptor->m_ItemID.ToString().c_str() : "?", s_Geom ? 1 : 0,
+            s_Visible ? 1 : 0, coop::Distance(s_Xf.pos, s_Local.pos), s_Xf.pos.z - s_Local.pos.z);
+        s_Out += s_Line;
+        ++s_Count;
+    });
+
+    return "held: " + std::to_string(s_Count) + " owned, in hand [" + LocalHeldItem() + "]" + s_Out;
+}
+
+void SdkWorld::SetPartnerHeldItem(const std::string& p_RepositoryId) {
+    m_StandInItemWanted = p_RepositoryId;
+}
+
+void SdkWorld::DropStandInItem() {
+    if (m_StandInItem && m_PartnerActor) {
+        m_PartnerActor->ReleaseItem(m_StandInItem, false);
+        Functions::ZWorldInventory_DestroyItem->Call(Globals::WorldInventory, TEntityRef<IItemBase>(m_StandInItem.m_entityRef));
+
+        if (m_Trace)
+            m_Trace("held item: " + m_StandInItemShown + " taken from the stand-in's hand");
+    }
+
+    m_StandInItem = {};
+    m_StandInItemShown.clear();
+}
+
+void SdkWorld::UpdateStandInItem() {
+    if (!m_InScene || !m_PartnerActor || !m_PartnerActor->m_pInventoryHandler || !Globals::WorldInventory)
+        return;
+
+    // Hidden (out of the mission, or far off): nothing in its hands to give away.
+    const std::string s_Want = m_PartnerHidden ? std::string() : m_StandInItemWanted;
+
+    // Asked for already: the copy is on its way (a few frames while its resource loads).
+    if (m_StandInItemTicket && m_Now - m_StandInItemAskedAt < 5.0)
+        return;
+
+    m_StandInItemTicket = 0;
+
+    if (s_Want == m_StandInItemShown)
+        return;
+
+    DropStandInItem();
+
+    // An item the game can't make here (not in this mission's resources) is tried again later.
+    if (s_Want.empty() || m_Now - m_StandInItemFailedAt < 10.0)
+        return;
+
+    ZEntityRef s_ActorRef = m_PartnerActor->m_pInventoryHandler->m_rActor.m_entityRef;
+
+    if (!s_ActorRef)
+        return;
+
+    const uint64_t s_NewId = Functions::ZEntityManager_GenerateDynamicObjectID->Call(Globals::EntityManager, s_ActorRef,
+        EDynamicEntityType::eDET_CharacterInventoryItem, 0);
+    const ZMemberDelegate<SdkWorld, void(uint32_t, TEntityRef<IItemBase>)> s_Delegate(this, &SdkWorld::OnStandInItemCreated);
+    const uint32_t s_Ticket = Functions::ZWorldInventory_RequestNewItem->Call(Globals::WorldInventory, ZRepositoryID(ZString(s_Want)),
+        s_Delegate, s_NewId, false, {}, s_ActorRef);
+
+    if (s_Ticket == *Globals::WorldInventory_InvalidTicket) {
+        m_StandInItemFailedAt = m_Now;
+
+        if (m_Trace)
+            m_Trace("held item: " + s_Want + " can't be made here");
+
+        return;
+    }
+
+    ZActorInventoryHandler::SPendingItemInfo s_Pending;
+    s_Pending.m_nTicket = s_Ticket;
+    s_Pending.m_eAttachLocation = static_cast<EAttachLocation>(m_StandInAttach);
+    s_Pending.m_eMaxTension = EGameTension::EGT_Undefined;
+    s_Pending.m_bLeftHand = false;
+    s_Pending.m_bWeapon = m_StandInWeapon;
+    m_PartnerActor->m_pInventoryHandler->m_aPendingItems.push_back(s_Pending);
+
+    m_StandInItemTicket = s_Ticket;
+    m_StandInItemAskedAt = m_Now;
+    m_StandInItemShown = s_Want;
+
+    if (m_Trace)
+        m_Trace("held item: asked for " + s_Want);
+}
+
+void SdkWorld::OnStandInItemCreated(uint32_t p_Ticket, TEntityRef<IItemBase> p_Item) {
+    if (!m_PartnerActor || !m_PartnerActor->m_pInventoryHandler || p_Ticket != m_StandInItemTicket)
+        return;
+
+    for (auto& s_Pending : m_PartnerActor->m_pInventoryHandler->m_aPendingItems) {
+        if (s_Pending.m_nTicket == p_Ticket) {
+            s_Pending.m_rItem = TEntityRef<IItem>(p_Item.m_entityRef);
+            m_StandInItem = s_Pending.m_rItem;
+            break;
+        }
+    }
+
+    Functions::ZActorInventoryHandler_FinalizePendingItems->Call(m_PartnerActor->m_pInventoryHandler);
+    m_StandInItemTicket = 0;
+
+    // Never picked up from its hands, by our 47 or anyone.
+    if (auto* s_Item = p_Item.m_entityRef.QueryInterface<ZHM5Item>())
+        if (s_Item->m_rItemPickupEnabled.m_entityRef)
+            s_Item->m_rItemPickupEnabled.m_entityRef.SetProperty("m_bValue", false);
+
+    if (m_Trace)
+        m_Trace("held item: " + m_StandInItemShown + " in the stand-in's hand");
+}
+
+std::string SdkWorld::StandInItemTest(const std::string& p_Arg) {
+    // standinitem <attach> <weapon 0/1> <repository id | mine | off>
+    std::istringstream s_Args(p_Arg);
+    std::string s_What;
+    int s_Weapon = 0;
+    s_Args >> m_StandInAttach >> s_Weapon >> s_What;
+    m_StandInWeapon = s_Weapon != 0;
+
+    if (s_What == "mine") {
+        const auto s_Player = SDK()->GetLocalPlayer();
+        s_What.clear();
+
+        ForEachSceneItem([&](uint64_t, ZHM5Item* p_Item, const ZEntityRef&) {
+            if (s_What.empty() && s_Player && p_Item->m_pOwner == s_Player.m_entityRef && p_Item->m_pItemConfigDescriptor)
+                s_What = p_Item->m_pItemConfigDescriptor->m_ItemID.ToString().c_str();
+        });
+    }
+
+    if (s_What == "off")
+        s_What.clear();
+
+    DropStandInItem();
+    m_StandInItemTicket = 0;
+    m_StandInItemFailedAt = -100.0;
+    SetPartnerHeldItem(s_What);
+    return "standinitem: attach " + std::to_string(m_StandInAttach) + " weapon " + std::to_string(s_Weapon) + " [" + s_What + "]";
 }
 
 void SdkWorld::ForEachSceneEntity(const std::function<void(uint64_t, const ZEntityRef&)>& p_Do) const {

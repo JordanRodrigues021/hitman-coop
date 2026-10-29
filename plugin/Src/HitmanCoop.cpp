@@ -813,6 +813,7 @@ void HitmanCoop::UpdatePlayerState() {
         s_State.flags |= coop::PlayerFlag_Away;
 
     s_State.colour = m_ColourSetting;
+    s_State.heldItem = m_World.LocalHeldItem();
     m_Session->SetLocalPlayerState(s_State);
 }
 
@@ -1236,6 +1237,7 @@ void HitmanCoop::OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent) {
 
     m_World.UpdatePauseCap();
     UpdateWaitForPartner(s_Now, m_FrameStatus);
+    m_World.UpdateRestart(m_LevelState == static_cast<int>(ZLevelManager::EGameState::EGS_Playing));
 
     // Shots that hit the partner's stand-in: both are told, once in a while.
     if (const int s_Hits = m_FriendlyHits.exchange(0); s_Hits > 0 && s_Now - m_FriendlyToldAt > 6.0 && m_FrameStatus.synced) {
@@ -1257,6 +1259,16 @@ void HitmanCoop::OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent) {
 
     if (m_CodeCopied.exchange(false))
         m_World.Notify("Join code copied: paste it to your friend.");
+
+    // What the partner holds, in the stand-in's hands (told on a change: the test channel's own stays).
+    {
+        const std::string s_Held = m_FrameStatus.synced && m_FrameStatus.peerStateKnown ? m_FrameStatus.peerState.heldItem : std::string();
+
+        if (s_Held != m_PartnerHeldTold) {
+            m_PartnerHeldTold = s_Held;
+            m_World.SetPartnerHeldItem(s_Held);
+        }
+    }
 
     m_World.UpdatePoses();
     PublishStatus();
@@ -1461,6 +1473,12 @@ void HitmanCoop::RunTestChannel(double p_Now) {
             m_Test.Trace(m_World.DoorState());
         else if (s_Verb == "itemtake" || s_Verb == "itemback")
             m_Test.Trace(m_World.ItemTest(s_Verb == "itemtake"));
+        else if (s_Verb == "helditems")
+            m_Test.Trace(m_World.HeldItemsTest());
+        else if (s_Verb == "standinitem")
+            m_Test.Trace(m_World.StandInItemTest(s_Arg));
+        else if (s_Verb == "body")
+            m_Test.Trace(m_World.BodyTest(s_Arg));
         else if (s_Verb == "victimsend")
             m_World.SetVictimSend(s_Arg != "off");
         else if (s_Verb == "behind")
@@ -1729,6 +1747,19 @@ DEFINE_PLUGIN_DETOUR(HitmanCoop, bool, OnLoadScene, ZEntitySceneContext* th, SSc
                     SDK()->MountChunk(s_Chunk);
             }
 
+            // The host's mission bricks, and our own PC's simulation quality ones: the host's are
+            // for their CPU.
+            std::vector<std::string> s_Bricks;
+
+            for (const auto& s_Brick : s_HostScene.bricks)
+                if (!coop::SceneDesc::IsMachineBrick(s_Brick))
+                    s_Bricks.push_back(s_Brick);
+
+            for (const auto& s_Brick : s_Scene.bricks)
+                if (coop::SceneDesc::IsMachineBrick(s_Brick))
+                    s_Bricks.push_back(s_Brick);
+
+            s_HostScene.bricks = s_Bricks;
             p_Parameters.m_SceneResource = ZString(s_HostScene.scene);
             p_Parameters.m_aAdditionalBrickResources.clear();
 
@@ -1758,7 +1789,14 @@ DEFINE_PLUGIN_DETOUR(HitmanCoop, bool, OnLoadScene, ZEntitySceneContext* th, SSc
         m_BusyToldAt = Now();
     }
 
-    m_Test.Trace("scene: loading " + s_Scene.scene + (s_Restart ? " (restart)" : ""));
+    // The bricks too: two games are in the same mission only with the same ones (see SceneDesc).
+    std::string s_BrickList;
+
+    for (const auto& s_Brick : s_Scene.bricks)
+        s_BrickList += (s_BrickList.empty() ? "" : ", ") + s_Brick;
+
+    Logger::Info("[HitmanCoop] Loading {} with bricks: {}", s_Scene.scene, s_BrickList.empty() ? "none" : s_BrickList);
+    m_Test.Trace("scene: loading " + s_Scene.scene + (s_Restart ? " (restart)" : "") + " bricks [" + s_BrickList + "]");
     m_World.OnSceneLoading(s_Scene);
     return HookResult<bool>(HookAction::Continue());
 }

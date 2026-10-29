@@ -21,6 +21,8 @@
 class ZActor;
 class ZGlobalOutfitKit;
 class ZTemplateEntityFactory;
+class IItem;
+class IItemBase;
 
 // IGameWorld backed by the running game through ZHMModSDK. Game thread only,
 // except the toast list which the render thread reads under m_ToastMutex.
@@ -54,6 +56,10 @@ public:
         return s_Was;
     }
     bool m_RestartForPartner = false;
+    // The partner's restart, made from the frame update once our mission is playing and nothing of
+    // ours holds it paused (see UpdateRestart).
+    void UpdateRestart(bool p_Playing);
+    double m_RestartAskedAt = -1.0;
     void ShowNpcPose(uint64_t p_Id, const coop::Pose& p_Pose) override;
     void ClearNpcPose(uint64_t p_Id) override;
     void WatchNpcPoses(const std::vector<uint64_t>& p_Ids) override;
@@ -61,6 +67,9 @@ public:
     // Puppets asked for before the mission has run a few seconds (their AI must have set itself
     // up first, like the stand-in's), applied once it has.
     std::unordered_map<uint64_t, bool> m_PendingPuppets;
+    // NPCs the session made puppets (run by the partner's game), so letting go of the partner's
+    // victim leaves one of them a puppet.
+    std::unordered_set<uint64_t> m_SessionPuppets;
     double m_SceneReadyAt = 0.0;
     void ApplyPendingPuppets();
     std::vector<PoseHook::Bone> m_NpcPoseBones;
@@ -250,6 +259,45 @@ public:
     void CollectDoorChanges(std::vector<coop::ItemChange>& p_Out);
     void ApplyPeerDoor(const coop::ItemChange& p_Change);
     void ForEachSceneEntity(const std::function<void(uint64_t, const ZEntityRef&)>& p_Do) const;
+
+    // Bodies (NPCs down), where each was last agreed to lie: moved in our game since (dragged,
+    // dumped, put away), the partner is told once it rests. Moved or put away by the partner, ours
+    // is hidden: a ragdoll can't be put anywhere (its physics takes it back to where it lay, with
+    // its matrix set once, every frame, or with the ragdoll off and on again: Paris, 3.280.0), and
+    // left there it was found where the partner had taken it from.
+    struct Body {
+        coop::Vec3 agreed;
+        coop::Vec3 last;
+        double stillSince = 0.0;
+        double downAt = 0.0;
+        bool hidden = false;
+        bool gone = false;
+    };
+    std::unordered_map<uint64_t, Body> m_Bodies;
+    void CollectBodyChanges(std::vector<coop::ItemChange>& p_Out);
+    void ApplyPeerBody(const coop::ItemChange& p_Change);
+    void AgreeBody(uint64_t p_Id, ZActor* p_Actor);
+    std::string BodyTest(const std::string& p_Arg);
+    // What the partner's 47 has in hand, in the stand-in's: a copy of it made here (by repository id)
+    // and given to the stand-in the way the game gives NPCs their items, in its right hand.
+    void SetPartnerHeldItem(const std::string& p_RepositoryId);
+    // What our own 47 has in hand: its repository id, empty if nothing.
+    std::string LocalHeldItem() const;
+    std::string HeldItemsTest() const;
+    std::string StandInItemTest(const std::string& p_Arg);
+    void UpdateStandInItem();
+    void DropStandInItem();
+    void OnStandInItemCreated(uint32_t p_Ticket, TEntityRef<IItemBase> p_Item);
+    std::string m_StandInItemWanted;
+    std::string m_StandInItemShown; // what it holds, or was asked for (ticket pending)
+    TEntityRef<IItem> m_StandInItem;
+    uint32_t m_StandInItemTicket = 0;
+    double m_StandInItemAskedAt = -1.0;
+    double m_StandInItemFailedAt = -100.0;
+    int m_StandInAttach = 0; // EAttachLocation (test: other places)
+    bool m_StandInWeapon = false;
+    mutable double m_HeldCheckAt = 0.0;
+    mutable std::string m_HeldItem;
     uint64_t m_ItemTestId = 0;
     coop::Transform m_ItemTestXf;
     // True for an event about an NPC we killed only to mirror the partner's game.
@@ -412,6 +460,9 @@ private:
     void PutDown(ZActor* p_Actor, uint64_t p_Id, uint8_t p_Flags);
     bool m_RemoteVictimDowned = false; // put down here already
     bool m_RemoteVictimDragged = false; // and moved since (a drag), so posed again
+    // Its AI held still while the partner has it: standing beside our 47's takedown, it saw that
+    // and raised the alarm, though the partner was taking it down at the same moment.
+    bool m_RemoteVictimStilled = false;
     coop::Vec3 m_RemoteVictimDownPos;
     // Knocked out by the partner. There is no way to knock an NPC out on command, so here it is
     // killed without a ragdoll and held in the partner's last pose, but still reported as alive.

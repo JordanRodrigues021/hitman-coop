@@ -14,7 +14,7 @@ namespace coop {
 // 9: chat, marks, loading notices, knock-outs, compact NPC snapshots.
 // 10: player status (alerts, menus, mission stats), mark kinds, what a loading partner loads.
 // 11: the host's mod version in Welcome, a player's colour and "away" in their status.
-constexpr uint32_t kProtocolVersion = 11;
+constexpr uint32_t kProtocolVersion = 12;
 
 constexpr uint16_t kDefaultPort = 47047;
 constexpr size_t kMaxPacketSize = 1200;
@@ -64,8 +64,19 @@ struct SceneDesc {
     std::vector<std::string> bricks;
     std::string codename;
 
+    // The same scene with the same mission bricks, in any order. The bricks each game picks for its
+    // own PC (see IsMachineBrick) are left out: two PCs often don't agree on them.
     bool SameAs(const SceneDesc& p_Other) const;
     bool Empty() const { return scene.empty(); }
+
+    // A brick the game adds for this PC, not for the mission: the simulation quality ones some
+    // missions have (New York, Whittleton Creek, Miami...), chosen by the CPU's core count:
+    // "intel_6core_skunk.brick", "scenario_flamingo_intel_8cores.brick".
+    static bool IsMachineBrick(const std::string& p_Brick);
+    // The same scene, its bricks apart by a difficulty's ("difficulty_hard_vermont_skunk.brick").
+    bool DiffersInDifficulty(const SceneDesc& p_Other) const;
+    // The mission bricks: lowercase and sorted, machine bricks left out.
+    std::vector<std::string> MissionBricks() const;
 
     // The mission's location folder, lowercase: "paris" for ".../scenes/missions/paris/...".
     // Empty when the scene isn't under scenes/missions/.
@@ -208,6 +219,10 @@ enum ItemFlags : uint8_t {
     ItemFlag_Door = 1 << 1,
     ItemFlag_DoorOpen = 1 << 2,
     ItemFlag_DoorFromFront = 1 << 3, // the player was on the door's +Y side
+    // Not an item but a body (id: the NPC's), moved in the sender's game since it went down
+    // (dragged, dumped) and at rest now, at xf. The receiver hides its own (see SdkWorld).
+    ItemFlag_Body = 1 << 4,
+    ItemFlag_BodyHidden = 1 << 5, // put away there: in a closet, a container, over a ledge
 };
 
 // An item from the scene (same entity id on both machines) that a player took, or put back into
@@ -382,6 +397,7 @@ struct MsgPlayerState {
     uint8_t menu = 0;            // the game menu they have open (EGameUIMenu + 1), 0: none
     uint32_t colour = 0;         // the colour they picked for themselves (0xRRGGBB), 0: the default
     PlayerStats stats;
+    std::string heldItem;        // the item in their 47's hands (its repository id), empty: none
 
     void Write(ByteWriter& w) const;
     bool Read(ByteReader& r);

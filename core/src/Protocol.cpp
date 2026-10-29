@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <iterator>
 #include <string_view>
 #include <utility>
 
@@ -56,16 +57,64 @@ static bool EqualsIgnoreCase(const std::string& a, const std::string& b) {
 }
 
 // Glacier resource paths are case-insensitive ("_PRO" and "_pro" both appear).
-bool SceneDesc::SameAs(const SceneDesc& p_Other) const {
-    if (!EqualsIgnoreCase(scene, p_Other.scene) || bricks.size() != p_Other.bricks.size())
-        return false;
+static std::string Lower(std::string p_Text) {
+    for (auto& c : p_Text)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 
-    for (size_t i = 0; i < bricks.size(); ++i) {
-        if (!EqualsIgnoreCase(bricks[i], p_Other.bricks[i]))
-            return false;
+    return p_Text;
+}
+
+static std::string_view FileName(std::string_view p_Path) {
+    const auto s_Slash = p_Path.find_last_of("/\\");
+    return s_Slash == std::string_view::npos ? p_Path : p_Path.substr(s_Slash + 1);
+}
+
+bool SceneDesc::IsMachineBrick(const std::string& p_Brick) {
+    // "intel_", a core count, "core": every simulation quality brick in the game's missions is
+    // named so (from the missions' own brick lists).
+    const std::string s_Lower = Lower(p_Brick);
+    const std::string_view s_Name = FileName(s_Lower);
+
+    for (size_t s_At = s_Name.find("intel_"); s_At != std::string_view::npos; s_At = s_Name.find("intel_", s_At + 1)) {
+        size_t s_End = s_At + 6;
+
+        while (s_End < s_Name.size() && std::isdigit(static_cast<unsigned char>(s_Name[s_End])))
+            ++s_End;
+
+        if (s_End > s_At + 6 && s_Name.substr(s_End, 4) == "core")
+            return true;
     }
 
-    return true;
+    return false;
+}
+
+std::vector<std::string> SceneDesc::MissionBricks() const {
+    std::vector<std::string> s_Out;
+
+    for (const auto& s_Brick : bricks)
+        if (!IsMachineBrick(s_Brick))
+            s_Out.push_back(Lower(s_Brick));
+
+    std::sort(s_Out.begin(), s_Out.end());
+    return s_Out;
+}
+
+bool SceneDesc::SameAs(const SceneDesc& p_Other) const {
+    return EqualsIgnoreCase(scene, p_Other.scene) && MissionBricks() == p_Other.MissionBricks();
+}
+
+bool SceneDesc::DiffersInDifficulty(const SceneDesc& p_Other) const {
+    if (!EqualsIgnoreCase(scene, p_Other.scene))
+        return false;
+
+    const auto s_Mine = MissionBricks();
+    const auto s_Theirs = p_Other.MissionBricks();
+    std::vector<std::string> s_Apart;
+    std::set_symmetric_difference(s_Mine.begin(), s_Mine.end(), s_Theirs.begin(), s_Theirs.end(), std::back_inserter(s_Apart));
+
+    return std::any_of(s_Apart.begin(), s_Apart.end(), [](const std::string& p_Brick) {
+        return FileName(p_Brick).substr(0, 11) == "difficulty_";
+    });
 }
 
 std::string SceneDesc::Location() const {
@@ -95,13 +144,16 @@ bool SceneDesc::SameLocationAs(const SceneDesc& p_Other) const {
 }
 
 std::string LocationDisplayName(const std::string& p_Location) {
-    // Folder names as they appear in scene paths, as far as known (not checked against game files).
+    // Folder names as they appear in scene paths (checked against the missions' scene paths in
+    // Peacock's contract data).
     // Only used in messages, never to decide anything; unknown folders are shown as-is.
     static const std::pair<std::string_view, std::string_view> c_Names[] = {
         { "thefacility", "ICA Facility" }, { "paris", "Paris" }, { "coastaltown", "Sapienza" },
         { "marrakesh", "Marrakesh" }, { "bangkok", "Bangkok" }, { "colorado", "Colorado" },
         { "hokkaido", "Hokkaido" }, { "miami", "Miami" }, { "colombia", "Santa Fortuna" },
-        { "mumbai", "Mumbai" }, { "northamerica", "Whittleton Creek" }, { "northsea", "Isle of Sgail" },
+        { "mumbai", "Mumbai" }, { "skunk", "Whittleton Creek" }, { "northamerica", "Whittleton Creek" },
+        { "theark", "Isle of Sgail" }, { "northsea", "Isle of Sgail" }, { "sheep", "Hawke's Bay" },
+        { "hawk", "Himmelstein" }, { "salty", "Hantu Port" }, { "caged", "Siberia" }, { "snug", "the Safehouse" },
         { "greedy", "New York" }, { "opulent", "Haven Island" }, { "golden", "Dubai" },
         { "ancestral", "Dartmoor" }, { "edgy", "Berlin" }, { "wet", "Chongqing" },
         { "elegant", "Mendoza" }, { "trapped", "Carpathian Mountains" }, { "rocky", "Ambrose Island" },
@@ -397,6 +449,8 @@ void MsgPlayerState::Write(ByteWriter& w) const {
     for (const uint16_t s_Value : { stats.kills, stats.targets, stats.knockouts, stats.nonTargetKills, stats.spotted,
              stats.bodiesFound, stats.recorded, stats.challenges })
         w.U16(s_Value);
+
+    w.Str(heldItem);
 }
 
 bool MsgPlayerState::Read(ByteReader& r) {
@@ -407,6 +461,9 @@ bool MsgPlayerState::Read(ByteReader& r) {
              &stats.bodiesFound, &stats.recorded, &stats.challenges })
         if (!r.U16(*s_Value))
             return false;
+
+    if (!r.Str(heldItem, 64))
+        return false;
 
     if ((flags & ~(PlayerFlag_Trespassing | PlayerFlag_EvidenceGone | PlayerFlag_Away)) || threat >= Threat_Count || menu > 32 || colour > 0xFFFFFF)
         return r.Fail();
