@@ -1408,6 +1408,11 @@ std::string HitmanCoop::Diagnostics(const coop::SessionStatus& p_Status) {
         p_Status.role == coop::SessionRole::Client ? " (client)" : "") << ", synced " << (p_Status.synced ? "yes" : "no") << "\n";
     s_Out << "Partner: mod " << p_Status.peerModVersion << ", game " << p_Status.peerGameVersion << "\n";
 
+    {
+        std::lock_guard s_Lock(m_StatusMutex);
+        s_Out << "Partner's 47: " << (m_StandInText.empty() ? "-" : m_StandInText) << "\n";
+    }
+
     char s_Line[256];
     std::snprintf(s_Line, sizeof(s_Line), "Link: ping %.0f ms, jitter %.0f ms, loss %.1f%%, sending %.0f kbit/s, playback delay %.0f ms, resends %llu%s\n",
         p_Status.stats.rttMs, p_Status.stats.jitterMs, p_Status.stats.lossPercent, p_Status.sendKbps, p_Status.playbackDelayMs,

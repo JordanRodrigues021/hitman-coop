@@ -4,7 +4,7 @@ param(
     [string]$NetTest = (Join-Path $PSScriptRoot "..\_build\install\HitmanCoop-NetTest.exe"),
     [string]$SdkRelease = (Join-Path $PSScriptRoot "..\_deps\sdk-release"),
     [string]$OutDir = (Join-Path $PSScriptRoot "..\_dist"),
-    [string]$Version = "0.12.0"
+    [string]$Version = "0.12.1"
 )
 
 $ErrorActionPreference = "Stop"

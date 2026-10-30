@@ -1710,6 +1710,11 @@ void HitmanCoop::PublishStatus() {
     m_OverlayPartnerStill = s_Now - m_PartnerMovedAt;
     m_OverlayCanReconnect = m_LastJoin.has_value() && s_Status.state == coop::SessionState::Failed;
     m_InMission = m_World.IsInScene();
+
+    if (s_Now - m_StandInTextAt > 0.5) {
+        m_StandInTextAt = s_Now;
+        m_StandInText = m_World.DescribeStandIn();
+    }
     m_RelayStatus.reset();
 
     if (m_Relay && m_Session && m_Session->Active())

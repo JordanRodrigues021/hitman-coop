@@ -160,6 +160,11 @@ void SdkWorld::OnSceneCleared() {
     m_PuppetFailed = false;
     m_PuppetRequestStart = -1.0;
     m_PartnerSpawnFailed = false;
+    m_SpawnFailure.clear();
+    m_SpawnWait = nullptr;
+    m_StandInWears.clear();
+    m_ToldCivilianStandIn = false;
+    m_RigHiddenSince = -1.0;
     m_PartnerHidden = false;
     m_PartnerOutfitWaitStart = -1.0;
     m_HasCivilianOutfit = false;
@@ -354,11 +359,36 @@ void SdkWorld::GuardPartnerAi(bool p_Unseen) {
         m_Trace("partner: AI guards:" + (s_Done.empty() ? std::string(" none") : s_Done));
 }
 
+// Logged once it takes 10 s, and told once at 20 s: a player saw no partner at all, with nothing
+// saying why.
+SdkWorld::Spawn SdkWorld::WaitFor(const char* p_What) {
+    if (m_SpawnWait != p_What) {
+        m_SpawnWait = p_What;
+        m_SpawnWaitSince = m_Now;
+        m_SpawnWaitTold = 0;
+    }
+
+    if (m_SpawnWaitTold == 0 && m_Now - m_SpawnWaitSince > 10.0) {
+        m_SpawnWaitTold = 1;
+        Logger::Warn("[HitmanCoop] Partner stand-in still waiting after 10 s: {}.", p_What);
+
+        if (m_Trace)
+            m_Trace(std::string("partner: still waiting after 10 s for ") + p_What);
+    }
+
+    if (m_SpawnWaitTold == 1 && m_Now - m_SpawnWaitSince > 20.0) {
+        m_SpawnWaitTold = 2;
+        Notify(std::string("Can't show your partner yet: waiting for ") + p_What + ".");
+    }
+
+    return Spawn::Waiting;
+}
+
 SdkWorld::Spawn SdkWorld::SpawnPartner(const coop::Transform& p_Xf) {
     const auto s_Scene = Globals::Hitman5Module->m_pEntitySceneContext->m_pScene;
 
     if (!s_Scene)
-        return Spawn::Waiting;
+        return WaitFor("the mission's scene");
 
     // The actor needs its outfit before it is activated, or it has no body to draw (this is the
     // order the SDK's Assets mod uses). The partner's outfit arrives right after joining; if it
@@ -368,13 +398,13 @@ SdkWorld::Spawn SdkWorld::SpawnPartner(const coop::Transform& p_Xf) {
             m_PartnerOutfitWaitStart = m_Now;
 
         if (m_Now - m_PartnerOutfitWaitStart < 3.0)
-            return Spawn::Waiting;
+            return WaitFor("your partner's outfit");
     }
 
     coop::OutfitDesc s_Outfit = m_PartnerOutfit;
 
     if (!m_HasPartnerOutfit && !GetLocalOutfit(s_Outfit))
-        return Spawn::Waiting;
+        return WaitFor("your partner's outfit (and ours can't be read)");
 
     const coop::OutfitDesc s_Wear = StandInOutfit(s_Outfit);
 
@@ -382,17 +412,18 @@ SdkWorld::Spawn SdkWorld::SpawnPartner(const coop::Transform& p_Xf) {
     // (a scene without NPCs, like an intro) than that. StandInOutfit looks again next frame.
     if (const auto* s_Kit = FindOutfitKit(s_Wear.repositoryId); s_Kit && s_Kit->m_pInterfaceRef &&
         s_Kit->m_pInterfaceRef->m_bIsHitmanSuit && !m_HeroSuitStandIn)
-        return Spawn::Waiting;
+        return WaitFor("an NPC outfit to dress the stand-in in (your partner wears one of 47's suits)");
 
     bool s_TemplateFailed = false;
     ZTemplateEntityFactory* s_Template = PartnerTemplate(s_TemplateFailed);
 
     if (!s_Template) {
         if (!s_TemplateFailed)
-            return Spawn::Waiting;
+            return WaitFor("the game's NPC template to load");
 
         Logger::Error("[HitmanCoop] The NPC actor template could not be loaded; cannot show partner.");
         Notify("Can't show your partner in this mission (actor template not loaded).");
+        m_SpawnFailure = "the game's NPC template could not be loaded";
         return Spawn::Failed;
     }
 
@@ -406,13 +437,18 @@ SdkWorld::Spawn SdkWorld::SpawnPartner(const coop::Transform& p_Xf) {
     if (!s_Entity) {
         Logger::Error("[HitmanCoop] Could not spawn the partner actor.");
         Notify("Can't show your partner in this mission (the game refused to spawn it).");
+        m_SpawnFailure = "the game refused to spawn it";
         return Spawn::Failed;
     }
 
     auto* s_Actor = s_Entity.QueryInterface<ZActor>();
 
-    if (!s_Actor)
+    if (!s_Actor) {
+        Logger::Error("[HitmanCoop] The partner actor spawned without an actor interface.");
+        Notify("Can't show your partner in this mission (the game made something else of it).");
+        m_SpawnFailure = "it spawned without an actor";
         return Spawn::Failed;
+    }
 
     s_Actor->m_sActorName = ZString(m_PartnerName);
     s_Actor->m_bStartEnabled = true;
@@ -444,17 +480,24 @@ SdkWorld::Spawn SdkWorld::SpawnPartner(const coop::Transform& p_Xf) {
     ResetPartnerRig(0.5);
     m_RigHidden = false; // spawned visible; hidden on its first pose until matched
     m_RigBody = m_RigAnimator = nullptr;
+    m_RigHiddenSince = -1.0;
     m_SkeletonRematches = 0;
+    m_SpawnWait = nullptr;
+    m_StandInWears = s_Wear.repositoryId;
+    m_StandInShownLogged = false;
 
     if (m_GuardOnSpawn)
         GuardPartnerAi(true);
-    Logger::Info("[HitmanCoop] Spawned partner stand-in.");
+    Logger::Info("[HitmanCoop] Spawned partner stand-in (outfit {}, partner's {}).", s_Wear.repositoryId,
+        m_HasPartnerOutfit ? s_Outfit.repositoryId : std::string("not here yet"));
 
     if (m_Trace) {
         char s_Text[128];
         std::snprintf(s_Text, sizeof(s_Text), "partner: spawned, actor %p entity %p", static_cast<void*>(s_Actor),
             static_cast<void*>(s_Entity.m_pObj));
         m_Trace(s_Text);
+        m_Trace("partner: stand-in wears " + s_Wear.repositoryId + ", partner's outfit " +
+            (m_HasPartnerOutfit ? s_Outfit.repositoryId : std::string("not here yet")));
     }
 
     // Swap in 47's head (and our own outfit if the partner's hasn't arrived yet).
@@ -1192,7 +1235,15 @@ void SdkWorld::ShowRemotePose(const coop::Pose& p_Pose) {
     // Every frame while not ready: the rebuilt body comes back visible on its own (seen on video,
     // its arms up against a wall for half a second after a disguise change).
     if (m_Partner && !m_PartnerHidden && !m_Mirror) {
-        const bool s_Ready = m_PartnerRig == 1 && s_LayoutOk && m_Now - m_PartnerRigReadyAt > 0.1;
+        bool s_Ready = m_PartnerRig == 1 && s_LayoutOk && m_Now - m_PartnerRigReadyAt > 0.1;
+        bool s_GaveUp = false;
+
+        if (s_Ready)
+            m_RigHiddenSince = -1.0;
+        else if (m_RigHiddenSince < 0.0)
+            m_RigHiddenSince = m_Now;
+        else if (m_Now - m_RigHiddenSince > 3.0)
+            s_Ready = s_GaveUp = true; // shown as it is (until the match is made) rather than not at all
 
         if (!s_Ready) {
             if (!m_RigHidden && m_Trace)
@@ -1205,8 +1256,16 @@ void SdkWorld::ShowRemotePose(const coop::Pose& p_Pose) {
             m_Partner.SetProperty("m_bVisible", true);
             m_RigHidden = false;
 
+            if (s_GaveUp)
+                Logger::Warn("[HitmanCoop] Partner stand-in shown before its skeleton was matched (rig {}, layout {}, {} bones from the partner, {} sent).",
+                    m_PartnerRig, s_LayoutOk ? "ok" : "differs", m_RemoteBones.size(), m_RemoteParents.size());
+            else if (!m_StandInShownLogged)
+                Logger::Info("[HitmanCoop] Partner stand-in shown.");
+
+            m_StandInShownLogged = true;
+
             if (m_Trace)
-                m_Trace("partner: shown, posed with the matched skeleton");
+                m_Trace(s_GaveUp ? "partner: shown though its skeleton isn't matched yet" : "partner: shown, posed with the matched skeleton");
         }
     }
 
@@ -1521,6 +1580,38 @@ std::string SdkWorld::DumpRemoteBones(size_t p_Count) const {
     return s_Out;
 }
 
+std::string SdkWorld::DescribeStandIn() const {
+    if (!m_InScene)
+        return "not in a mission";
+
+    if (!m_PartnerEnabled)
+        return "turned off (test channel)";
+
+    char s_Text[160];
+    const double s_PositionAge = m_PartnerWantedTime > 0.0 ? m_Now - m_PartnerWantedTime : -1.0;
+
+    if (!m_Partner) {
+        if (m_PartnerSpawnFailed)
+            return "couldn't be shown: " + m_SpawnFailure;
+
+        if (s_PositionAge < 0.0)
+            return "not shown: no position from the partner yet";
+
+        std::snprintf(s_Text, sizeof(s_Text), " (%.0f s; their last position %.1f s ago)", m_SpawnWait ? m_Now - m_SpawnWaitSince : 0.0, s_PositionAge);
+        return std::string("not shown yet, waiting for ") + (m_SpawnWait ? m_SpawnWait : "the next position") + s_Text;
+    }
+
+    std::string s_Out = m_PartnerHidden ? "hidden (partner away or loading)" : m_RigHidden ? "hidden while its skeleton is matched" : "shown";
+    coop::Vec3 s_At;
+    coop::Transform s_Local;
+    const bool s_Distance = GetPartnerPosition(s_At) && GetLocalAvatar(s_Local);
+
+    std::snprintf(s_Text, sizeof(s_Text), ", %.0f m away, position %.1f s ago, pose %s, skeleton %s%s, wears ", s_Distance ? coop::Distance(s_At, s_Local.pos) : -1.f,
+        s_PositionAge, PartnerPosed() ? "arriving" : "none", m_PartnerRig == 1 ? (m_BoneMap.empty() ? "same" : "matched") : "not matched",
+        m_RemoteParents.empty() ? "" : " (sent)");
+    return s_Out + s_Text + (m_StandInWears.empty() ? std::string("?") : m_StandInWears);
+}
+
 std::string SdkWorld::DescribePartner() const {
     if (!m_PartnerActor)
         return "none";
@@ -1778,6 +1869,7 @@ void SdkWorld::ApplyPartnerOutfit() {
 
     if (!s_KitPtr) {
         Logger::Warn("[HitmanCoop] Partner outfit {} is not known here.", s_Use.repositoryId);
+        m_StandInWears += " (partner's " + s_Use.repositoryId + " not known here)";
         return;
     }
 
@@ -1829,6 +1921,15 @@ void SdkWorld::ApplyPartnerOutfit() {
     }
 
     Functions::ZActor_SetOutfit->Call(m_PartnerActor, s_KitRef, s_Use.charset, s_Variation, false);
+    m_StandInWears = s_Use.repositoryId;
+
+    // A player looked for 47 in his suit and took the stand-in for one of the crowd: told once a
+    // mission.
+    if (m_HasPartnerOutfit && s_Use.repositoryId != m_PartnerOutfit.repositoryId && !m_ToldCivilianStandIn) {
+        m_ToldCivilianStandIn = true;
+        Notify(m_PartnerName + " wears one of 47's suits: you see them in civilian clothes (with 47's head), "
+            "because the game crashes with a suit on a stand-in. Look for their name tag.");
+    }
 
     // Matched again for the new body (see CheckPartnerSkeleton), hidden meanwhile.
     ResetPartnerRig(0.5);

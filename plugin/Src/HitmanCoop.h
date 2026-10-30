@@ -262,6 +262,8 @@ private:
     int m_OverlayReady = 0;             // 1: we asked, waiting; 2: the partner asked us
     double m_OverlayPartnerStill = 0.0; // seconds the partner hasn't moved
     bool m_OverlayCanReconnect = false;
+    std::string m_StandInText;          // for diagnostics: the partner's stand-in, and why it isn't shown
+    double m_StandInTextAt = -1.0;
     float m_HudBottom = 0.f;          // render thread: where the HUD ended this frame
     std::deque<float> m_PingHistory;  // render thread
     double m_PingSampleAt = 0.0;

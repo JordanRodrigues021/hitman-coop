@@ -3,6 +3,31 @@
 All notable changes to HITMAN Co-op, created by **Jordan Rodrigues**.
 Both players always need the same version.
 
+## 0.12.1 (2026-10-30)
+
+For a player who couldn't see their partner's 47 at all. Plays with 0.12.0 (same network protocol),
+but updating both is best.
+
+**Fixed**
+- Your partner could stay invisible for good. Their stand-in is hidden for a moment while it is
+  matched to their 47's skeleton; if that match never came, it never showed. Now it is shown
+  anyway after 3 seconds.
+- Your partner could fail to show without a word while the mod waited for something (their outfit,
+  an outfit to dress the stand-in in, the game's NPC template). The log now says what it waits for
+  after 10 seconds, and you're told on screen after 20.
+
+**Changed**
+- While your partner wears one of 47's own suits, you see them in civilian clothes with 47's head
+  (a suit on their stand-in crashes the game). You're now told so once a mission, with a reminder
+  to look for their name tag, so you don't take them for one of the crowd.
+- About > Copy diagnostics has a new "Partner's 47" line: shown, hidden, or what it's waiting for,
+  with distance and the outfit worn. The log names the outfit the stand-in was given.
+
+**Known limits**
+- Tested in Paris (game version 3.280.0) with the test partner. The 3-second fallback couldn't be
+  triggered with the test setup. If you still can't see your partner, please send the diagnostics
+  and `HitmanCoop.log` from both PCs.
+
 ## 0.12.0 (2026-10-29)
 
 Fixes for the first reports from players. Thank you to everyone who tested 0.11.0 and wrote in!

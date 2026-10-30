@@ -203,6 +203,8 @@ public:
     // For the test channel.
     bool HasPartner() const { return static_cast<bool>(m_Partner) && !m_PartnerHidden; }
     bool PartnerSpawnFailed() const { return m_PartnerSpawnFailed; }
+    // For diagnostics: the stand-in's state, and why it isn't shown if it isn't.
+    std::string DescribeStandIn() const;
     size_t LastNpcCount() const { return m_NpcsById.size(); }
     bool GetPartnerPosition(coop::Vec3& p_Out) const;
     coop::Vec3 PartnerWanted() const { return m_PartnerWanted; }
@@ -437,6 +439,9 @@ private:
     // Hidden until its skeleton is matched and posed: a new body (joining, or a disguise change,
     // which rebuilds it) first shows in its raw arms-out pose, and the old match no longer fits.
     bool m_RigHidden = false;
+    // Since when it waits for a match. Never more than a few seconds: a player saw no partner at
+    // all, so after that it is shown as it is.
+    double m_RigHiddenSince = -1.0;
     double m_PartnerRigReadyAt = 0.0;
     const void* m_RigBody = nullptr;     // the animated actor and animator the match was made for
     const void* m_RigAnimator = nullptr;
@@ -484,6 +489,16 @@ private:
     double m_PartnerTemplateRequestTime = 0.0;
     bool m_HasPartnerOutfit = false;
     double m_PartnerOutfitWaitStart = -1.0;
+    // What the stand-in waits for before it can be spawned (logged and told if it takes long), or
+    // why it couldn't be; and the outfit it wears.
+    Spawn WaitFor(const char* p_What);
+    const char* m_SpawnWait = nullptr;
+    double m_SpawnWaitSince = -1.0;
+    int m_SpawnWaitTold = 0; // 1: logged, 2: told too
+    std::string m_SpawnFailure;
+    std::string m_StandInWears;
+    bool m_StandInShownLogged = false;
+    bool m_ToldCivilianStandIn = false;
     bool m_HasCivilianOutfit = false;
     coop::OutfitDesc m_CivilianOutfit;
     coop::OutfitDesc m_PartnerOutfit;

@@ -41,7 +41,9 @@ countdown for the perfect double hit.
 
 **A shared mission**
 - Your partner's 47 in your game, animated with their exact movements (their whole skeleton pose,
-  30 times a second), wearing their disguise.
+  30 times a second), wearing their disguise. While they wear one of 47's own suits, you see them
+  in civilian clothes with 47's head (a suit on their stand-in crashes the game): look for their
+  name tag.
 - Shared NPCs: kills, knock-outs (by any means), alert levels, and NPCs walking where they walk in
   your partner's game. An NPC your partner has hold of stops reacting in your game, so a guard you
   both take down at the same moment doesn't see the other takedown.
@@ -223,6 +225,10 @@ Then both players type `your.server.address:47100` as the co-op server in Settin
 - **Can't connect by IP**: the host's firewall or router blocks UDP 47047. Use a join code,
   Tailscale, or forward the port.
 - **"Co-op can't run on this game version"**: the game was updated; get the matching HITMAN Co-op release.
+- **I can't see my partner's 47**: if they wear one of 47's suits, they show in civilian clothes
+  with 47's head; look for their name tag and radar dot. If there's no name tag either, restart the
+  mission together, and if it still happens, send the diagnostics and logs below from both PCs
+  (diagnostics have a "Partner's 47" line saying why they aren't shown).
 - **"You are in a different mission" / "different difficulties"**: both players start the same
   mission on the same difficulty. (Since 0.12.0, two PCs with different CPUs no longer count as
   different missions in New York, Whittleton Creek and other HITMAN 2 locations.)
@@ -245,6 +251,10 @@ leaderboards, play co-op offline.
 together with Peacock.
 
 ## What's new
+
+**0.12.1**: help for "I can't see my partner": you're told when your partner shows in civilian
+clothes, the game says what it's waiting for before showing them, and they can no longer stay
+hidden for good.
 
 **0.12.0**: fixes for the first players' reports: New York and Whittleton Creek main missions,
 dragged and hidden bodies, crashes on restart, double takedowns being witnessed, and invisible items
