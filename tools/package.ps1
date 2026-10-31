@@ -4,7 +4,7 @@ param(
     [string]$NetTest = (Join-Path $PSScriptRoot "..\_build\install\HitmanCoop-NetTest.exe"),
     [string]$SdkRelease = (Join-Path $PSScriptRoot "..\_deps\sdk-release"),
     [string]$OutDir = (Join-Path $PSScriptRoot "..\_dist"),
-    [string]$Version = "0.12.1"
+    [string]$Version = "0.12.2"
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,6 +13,17 @@ $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 if (-not (Test-Path $ModDll)) { throw "Mod DLL not found at $ModDll. Build and install first (see BUILDING.md)." }
 if (-not (Test-Path $NetTest)) { throw "Connection test not found at $NetTest. Build and install first (see BUILDING.md)." }
 if (-not (Test-Path $SdkRelease)) { throw "SDK release not found at $SdkRelease. Run tools\fetch-sdk.ps1 first." }
+
+# 0.12.1 shipped 0.12.0's DLL (built, but the install step skipped): each must say this version,
+# and the mod DLL must be the one just built.
+foreach ($Bin in $ModDll, $NetTest) {
+    $Text = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($Bin))
+    if (-not $Text.Contains($Version)) { throw "$Bin isn't version $Version. Build and install first (see BUILDING.md)." }
+}
+$Built = Join-Path $PSScriptRoot "..\_build\plugin\RelWithDebInfo\HitmanCoop.dll"
+if ((Test-Path $Built) -and (Get-FileHash $Built).Hash -ne (Get-FileHash $ModDll).Hash) {
+    throw "$ModDll differs from the last build at $Built. Run the install step (see BUILDING.md)."
+}
 
 # The release zip may or may not wrap everything in one top-level folder.
 $SdkRoot = $SdkRelease

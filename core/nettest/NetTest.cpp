@@ -358,6 +358,7 @@ int Run(bool p_Host, const std::string& p_Address, uint16_t p_Port) {
 //   at <x> <y> <z>   stand at that world position, facing the host's 47
 //   line <speed> <length>  walk back and forth on a line in front of the host's 47 (m/s, m)
 //   beside [metres]  stay at the host's side (+ right, - left), facing the way the host faces
+//   nooutfit  send no outfit (as a player whose game can't name it)
 //   echo [seconds] [metres]  replay the host's own path and skeleton pose that many seconds
 //                    later, offset to the side: the host sees their own moves copied
 //   ko     knock out the alive NPC nearest the host's 47 (the host's game should knock it out)
@@ -400,6 +401,7 @@ int RunBot(const std::string& p_Address, const std::string& p_CommandFile) {
     bool s_Beside = false;
     float s_BesideOffset = 1.4f;
     bool s_Echo = false;
+    bool s_NoOutfit = false;
     double s_EchoDelay = 1.0;
     float s_EchoOffset = 1.5f;
     struct EchoFrame { double time; Transform xf; Pose pose; FakeWorld::Victim victim; std::vector<int16_t> skeleton; };
@@ -441,6 +443,12 @@ int RunBot(const std::string& p_Address, const std::string& p_CommandFile) {
             s_Beside = s_Echo = false;
             s_Line = false;
             Log("Walking circles around the host.");
+        }
+        else if (p_Command == "nooutfit") {
+            // As a player whose game can't name 47's outfit: none is sent.
+            s_NoOutfit = true;
+            s_World.outfit = {};
+            Log("Sending no outfit.");
         }
         else if (p_Command.rfind("echo", 0) == 0) {
             float s_Delay = 1.f, s_Offset = 1.5f;
@@ -843,7 +851,7 @@ int RunBot(const std::string& p_Address, const std::string& p_CommandFile) {
         }
 
         // Wear what the host wears.
-        if (s_World.remoteOutfitChanges != s_OutfitChanges) {
+        if (s_World.remoteOutfitChanges != s_OutfitChanges && !s_NoOutfit) {
             s_OutfitChanges = s_World.remoteOutfitChanges;
             s_World.outfit = s_World.remoteOutfit;
             Log("Host outfit %s (charset %d, variation %d); wearing it too.", s_World.outfit.repositoryId.c_str(),

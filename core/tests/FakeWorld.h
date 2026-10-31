@@ -25,7 +25,7 @@ public:
     }
 
     bool GetLocalOutfit(coop::OutfitDesc& p_Out) const override {
-        if (!inScene)
+        if (!inScene || outfit.repositoryId.empty())
             return false;
 
         p_Out = outfit;

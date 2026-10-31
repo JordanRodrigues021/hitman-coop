@@ -1405,6 +1405,8 @@ void HitmanCoop::RunTestChannel(double p_Now) {
             m_Test.Trace(m_World.DescribeActorAi());
         else if (s_Verb == "partner")
             m_World.SetPartnerEnabled(s_Arg != "off");
+        else if (s_Verb == "outfitunknown")
+            m_World.SetOutfitUnknownTest(s_Arg != "off");
         else if (s_Verb == "mirror")
             m_World.SetMirror(s_Arg == "on");
         else if (s_Verb == "victimtest")

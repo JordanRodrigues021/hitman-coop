@@ -3,7 +3,34 @@
 All notable changes to HITMAN Co-op, created by **Jordan Rodrigues**.
 Both players always need the same version.
 
+## 0.12.2 (2026-10-31)
+
+For players who were connected, with kills, marks and NPCs shared, but couldn't see each other's
+47 at all. Plays with 0.12.0 and 0.12.1, but please update both PCs.
+
+**Fixed**
+- **Your partner's 47 didn't show at all, on either PC.** Before showing your partner, the mod
+  needs to know their outfit. When it couldn't name the outfit 47 wears (likely with some unlocked
+  or DLC suits), no outfit was ever sent, and your partner was never shown, on both PCs, without a
+  word. Outfits are now also named by the outfit's own id, or the one it's based on, and if neither
+  outfit is known after 3 seconds your partner is shown anyway in civilian clothes (with 47's
+  head), with a message saying so.
+- **The 0.12.1 download contained 0.12.0.** The mod inside it was the old one, so it said 0.12.0
+  and none of the 0.12.1 changes were there. 0.12.2 contains them, and the release build now checks
+  that the files it packs are the version being released.
+
+**Changed**
+- The log names an outfit that can't be named, and how one was found, to help with bug reports.
+
+**Known limits**
+- Tested on game version 3.290.1 in Paris and the ICA Facility with the test partner, including a
+  partner whose outfit isn't known. The players' suits themselves couldn't be tried here: if you
+  still can't see your partner, please send About > Copy diagnostics and `HitmanCoop.log` from
+  both PCs.
+
 ## 0.12.1 (2026-10-30)
+
+*The 0.12.1 download contained the 0.12.0 mod by mistake; these changes first shipped in 0.12.2.*
 
 For a player who couldn't see their partner's 47 at all. Plays with 0.12.0 (same network protocol),
 but updating both is best.

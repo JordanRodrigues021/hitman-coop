@@ -164,6 +164,8 @@ void SdkWorld::OnSceneCleared() {
     m_SpawnWait = nullptr;
     m_StandInWears.clear();
     m_ToldCivilianStandIn = false;
+    m_OutfitIdCache.clear(); // kits are the scene's, and their memory is reused
+    m_OutfitIdTold.clear();
     m_RigHiddenSince = -1.0;
     m_PartnerHidden = false;
     m_PartnerOutfitWaitStart = -1.0;
@@ -209,6 +211,17 @@ bool SdkWorld::GetLocalAvatar(coop::Transform& p_Out) const {
     return true;
 }
 
+namespace {
+std::string RepositoryIdText(const ZRepositoryID& p_Id) {
+    const ZString s_Str = p_Id.ToString();
+    std::string s_Text(s_Str.c_str(), s_Str.size());
+    return s_Text.empty() || s_Text == "00000000-0000-0000-0000-000000000000" ? std::string() : s_Text;
+}
+}
+
+// The kit's repository id: from the game's outfit repository, else the kit's own id, else its
+// parent's. Players saw no partner at all, on both PCs, with nothing in either log: an outfit that
+// couldn't be named was never sent, and the stand-in waited for it for good.
 std::string SdkWorld::OutfitKitToRepositoryId(ZGlobalOutfitKit* p_Kit) const {
     if (const auto s_It = m_OutfitIdCache.find(p_Kit); s_It != m_OutfitIdCache.end())
         return s_It->second;
@@ -217,18 +230,36 @@ std::string SdkWorld::OutfitKitToRepositoryId(ZGlobalOutfitKit* p_Kit) const {
 
     for (const auto& s_Pair : Globals::ContentKitManager->m_repositoryGlobalOutfitKits) {
         if (s_Pair.second.m_pInterfaceRef == p_Kit) {
-            const ZString s_Str = s_Pair.first.ToString();
-            s_Id.assign(s_Str.c_str(), s_Str.size());
+            s_Id = RepositoryIdText(s_Pair.first);
             break;
         }
     }
 
-    m_OutfitIdCache[p_Kit] = s_Id;
+    const char* s_From = "repository";
+
+    if (s_Id.empty() && p_Kit) {
+        s_Id = RepositoryIdText(p_Kit->m_sId);
+        s_From = "the kit's own id";
+    }
+
+    if (s_Id.empty() && p_Kit && p_Kit->m_pParentOutfit.m_pInterfaceRef) {
+        s_Id = RepositoryIdText(p_Kit->m_pParentOutfit.m_pInterfaceRef->m_sId);
+        s_From = "its parent kit";
+    }
+
+    if (m_Trace && (s_Id.empty() || std::string(s_From) != "repository") && m_OutfitIdTold.insert(p_Kit).second)
+        m_Trace("outfit: " + std::string(p_Kit && p_Kit->m_sTitle.size() ? p_Kit->m_sTitle.c_str() : "a kit") +
+            (s_Id.empty() ? " can't be named" : " named by " + std::string(s_From) + ": " + s_Id));
+
+    // Not kept when not found: it may be known a moment later.
+    if (!s_Id.empty())
+        m_OutfitIdCache[p_Kit] = s_Id;
+
     return s_Id;
 }
 
 bool SdkWorld::GetLocalOutfit(coop::OutfitDesc& p_Out) const {
-    if (!m_InScene)
+    if (!m_InScene || m_OutfitUnknownTest)
         return false;
 
     auto s_Player = SDK()->GetLocalPlayer();
@@ -403,10 +434,15 @@ SdkWorld::Spawn SdkWorld::SpawnPartner(const coop::Transform& p_Xf) {
 
     coop::OutfitDesc s_Outfit = m_PartnerOutfit;
 
+    // Neither theirs nor ours known: an NPC outfit of the mission (see StandInOutfit) rather than
+    // no partner at all.
     if (!m_HasPartnerOutfit && !GetLocalOutfit(s_Outfit))
-        return WaitFor("your partner's outfit (and ours can't be read)");
+        s_Outfit = {};
 
     const coop::OutfitDesc s_Wear = StandInOutfit(s_Outfit);
+
+    if (s_Wear.repositoryId.empty() || !FindOutfitKit(s_Wear.repositoryId))
+        return WaitFor("an outfit to dress the stand-in in (neither your partner's nor yours is known)");
 
     // An NPC in one of 47's suits crashes the game when it sees a kill: rather no stand-in yet
     // (a scene without NPCs, like an intro) than that. StandInOutfit looks again next frame.
@@ -505,6 +541,11 @@ SdkWorld::Spawn SdkWorld::SpawnPartner(const coop::Transform& p_Xf) {
         m_PartnerOutfit = s_Outfit;
 
     ApplyPartnerOutfit();
+
+    if (!m_HasPartnerOutfit && !m_ToldCivilianStandIn) {
+        m_ToldCivilianStandIn = true;
+        Notify(m_PartnerName + "'s outfit isn't known here yet: you see them in civilian clothes (with 47's head). Look for their name tag.");
+    }
 
     return Spawn::Done;
 }
@@ -1807,6 +1848,9 @@ void SdkWorld::SetRemoteOutfit(const coop::OutfitDesc& p_Outfit) {
 // Mirrors Assets::EquipOutfit from the SDK: temporarily point the kit's "Actor" variations at
 // the "HeroA" ones so the stand-in wears the outfit with 47's head, then restore them.
 const TEntityRef<ZGlobalOutfitKit>* SdkWorld::FindOutfitKit(const std::string& p_RepositoryId) {
+    if (p_RepositoryId.empty())
+        return nullptr;
+
     const auto s_It = Globals::ContentKitManager->m_repositoryGlobalOutfitKits.find(ZRepositoryID(ZString(p_RepositoryId)));
     return s_It == Globals::ContentKitManager->m_repositoryGlobalOutfitKits.end() ? nullptr : &s_It->second;
 }

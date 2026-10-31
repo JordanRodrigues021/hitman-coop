@@ -252,6 +252,9 @@ together with Peacock.
 
 ## What's new
 
+**0.12.2**: fixes your partner's 47 not showing at all, on both PCs, while everything else was
+shared. Also the real 0.12.1 changes: the 0.12.1 download contained 0.12.0 by mistake.
+
 **0.12.1**: help for "I can't see my partner": you're told when your partner shows in civilian
 clothes, the game says what it's waiting for before showing them, and they can no longer stay
 hidden for good.

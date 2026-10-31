@@ -5,7 +5,7 @@
 #include <string>
 
 // Words and numbers the game-thread code and the UI share.
-inline constexpr const char* c_ModVersion = "0.12.1";
+inline constexpr const char* c_ModVersion = "0.12.2";
 inline constexpr const char* c_Author = "Jordan Rodrigues";
 
 // The quick messages as they come (each can be rewritten under Settings).

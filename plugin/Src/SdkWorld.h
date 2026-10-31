@@ -323,6 +323,8 @@ public:
     void SetTrace(std::function<void(const std::string&)> p_Trace) { m_Trace = std::move(p_Trace); }
     // Test channel: "partner off" never spawns the stand-in, to tell its effects apart from the rest.
     void SetPartnerEnabled(bool p_Enabled) { m_PartnerEnabled = p_Enabled; }
+    // Test channel: our 47's outfit can't be named (as on some players' PCs).
+    void SetOutfitUnknownTest(bool p_On) { m_OutfitUnknownTest = p_On; }
     // Test channel: walk the stand-in with the game's AI instead of teleporting it.
     void SetPuppetMode(bool p_On) { m_PuppetMode = p_On; }
     PartnerPuppet& Puppet() { return m_Puppet; }
@@ -368,6 +370,7 @@ private:
     bool m_PartnerSpawnFailed = false;
     bool m_PartnerHidden = false;
     bool m_PartnerEnabled = true;
+    bool m_OutfitUnknownTest = false;
     // Without poses from the partner (an older game build the hook can't attach to), the
     // stand-in walks by the game's AI instead.
     bool m_PuppetMode = true;
@@ -507,6 +510,7 @@ private:
     mutable std::unordered_map<uint64_t, ZActor*> m_NpcsById;
     mutable std::unordered_map<uint64_t, int> m_IdCountScratch; // kept to avoid reallocating every scan
     mutable std::unordered_map<ZGlobalOutfitKit*, std::string> m_OutfitIdCache;
+    mutable std::unordered_set<ZGlobalOutfitKit*> m_OutfitIdTold; // traced once: named another way, or not at all
 
     // "Viktor Novikov (guard)", or just "a guard" for the crowd's "John Doe".
     static std::string NpcLabel(const ZActor* p_Actor);
