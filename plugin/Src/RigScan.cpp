@@ -135,3 +135,21 @@ std::vector<RigScan::Found> RigScan::FindParents(const void* p_Animator, size_t 
 
     return s_Found;
 }
+
+std::string RigScan::Words(const void* p_At, size_t p_Size) {
+    std::string s_Out;
+    char s_Line[48];
+
+    for (size_t i = 0; i + 8 <= p_Size; i += 8) {
+        uint64_t s_Word = 0;
+
+        if (!Read(reinterpret_cast<uintptr_t>(p_At) + i, &s_Word, sizeof(s_Word)))
+            std::snprintf(s_Line, sizeof(s_Line), " +0x%zx ?", i);
+        else
+            std::snprintf(s_Line, sizeof(s_Line), " +0x%zx %016llx", i, static_cast<unsigned long long>(s_Word));
+
+        s_Out += s_Line;
+    }
+
+    return s_Out;
+}

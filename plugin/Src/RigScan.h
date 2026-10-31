@@ -15,4 +15,7 @@ namespace RigScan {
     };
 
     std::vector<Found> FindParents(const void* p_Animator, size_t p_Bones, int p_Depth = 3);
+
+    // p_Size bytes at p_At as 8-byte words ("+0x10 0000000142a3b0c8"), readable pages only.
+    std::string Words(const void* p_At, size_t p_Size);
 }

@@ -695,13 +695,16 @@ int RunBot(const std::string& p_Address, const std::string& p_CommandFile) {
             }
         }
 
-        // Bodies the host moved or put away.
+        // Bodies the host moved or put away, and items it took or let go of.
         for (; s_PeerItemsSeen < s_World.peerItems.size(); ++s_PeerItemsSeen) {
             const auto& s_Item = s_World.peerItems[s_PeerItemsSeen];
 
             if (s_Item.flags & ItemFlag_Body)
                 Log("Host's body %016llx %s at (%.2f, %.2f, %.2f).", static_cast<unsigned long long>(s_Item.id),
                     (s_Item.flags & ItemFlag_BodyHidden) ? "put away" : "moved", s_Item.xf.pos.x, s_Item.xf.pos.y, s_Item.xf.pos.z);
+            else if (!(s_Item.flags & ItemFlag_Door))
+                Log("Host's item %016llx %s at (%.2f, %.2f, %.2f).", static_cast<unsigned long long>(s_Item.id),
+                    s_Item.Taken() ? "taken" : "let go of", s_Item.xf.pos.x, s_Item.xf.pos.y, s_Item.xf.pos.z);
         }
 
         // What the host's game reports alert (its own NPCs' alert levels).
@@ -884,9 +887,9 @@ int RunBot(const std::string& p_Address, const std::string& p_CommandFile) {
             if (s_Status.peerStateKnown && !(s_Status.peerState == s_LastHostState)) {
                 s_LastHostState = s_Status.peerState;
                 const auto& s_S = s_LastHostState;
-                Log("Host state: threat %u, menu %u, trespassing %d, kills %u (targets %u), knocked out %u, spotted %u, bodies %u, challenges %u",
+                Log("Host state: threat %u, menu %u, trespassing %d, kills %u (targets %u), knocked out %u, spotted %u, bodies %u, challenges %u, in hand '%s'",
                     s_S.threat, s_S.menu, (s_S.flags & PlayerFlag_Trespassing) ? 1 : 0, s_S.stats.kills, s_S.stats.targets,
-                    s_S.stats.knockouts, s_S.stats.spotted, s_S.stats.bodiesFound, s_S.stats.challenges);
+                    s_S.stats.knockouts, s_S.stats.spotted, s_S.stats.bodiesFound, s_S.stats.challenges, s_S.heldItem.c_str());
             }
 
             const uint8_t s_Stage = s_Status.peerBusy ? s_Status.peerBusyStage : static_cast<uint8_t>(LoadStage_None);

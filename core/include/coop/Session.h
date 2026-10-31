@@ -93,7 +93,7 @@ public:
 
 struct SessionConfig {
     std::string playerName = "Agent";
-    std::string modVersion = "0.12.2";
+    std::string modVersion = "0.13.0";
     std::string gameVersion = "unknown";
 
     double connectTimeout = 10.0;

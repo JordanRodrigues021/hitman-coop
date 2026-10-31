@@ -4,7 +4,9 @@ param(
     [string]$NetTest = (Join-Path $PSScriptRoot "..\_build\install\HitmanCoop-NetTest.exe"),
     [string]$SdkRelease = (Join-Path $PSScriptRoot "..\_deps\sdk-release"),
     [string]$OutDir = (Join-Path $PSScriptRoot "..\_dist"),
-    [string]$Version = "0.12.2"
+    [string]$Version = "0.13.0",
+    # Where the mod's updater downloads this version's files from (see plugin/Src/Updater.h).
+    [string]$UpdateBase = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -58,7 +60,7 @@ if (Test-Path (Join-Path $SdkRoot "LICENSE")) { Copy-Item (Join-Path $SdkRoot "L
 if (Test-Path (Join-Path $SdkRoot "licenses")) { Copy-Item (Join-Path $SdkRoot "licenses") (Join-Path $Stage "licenses\ZHMModSDK-third-party") -Recurse }
 Set-Content (Join-Path $Stage "licenses\SOURCES.txt") @(
     "HITMAN Co-op, created by Jordan Rodrigues, is free software under the GNU GPL v3 or later.",
-    "ZHMModSDK v4.1.1 by OrfeasZ (GPL-3.0) source: https://github.com/OrfeasZ/ZHMModSDK/tree/v4.1.1"
+    "ZHMModSDK v4.2.1 by OrfeasZ (GPL-3.0) source: https://github.com/OrfeasZ/ZHMModSDK/tree/v4.2.1"
 )
 
 # The zip: for people who prefer extracting and running Install.bat.
@@ -91,3 +93,33 @@ foreach ($File in $Zip, $Setup) {
     Write-Host "Packaged $File"
     Write-Host "SHA-256 $Hash"
 }
+
+# The self-update: update.txt (version, each file the installer puts in the game's Retail folder
+# with its size and SHA-256, what's new) and those files under their own names, all uploaded to
+# the release. The mod reads update.txt from the latest release.
+if (-not $UpdateBase) { $UpdateBase = "https://github.com/JordanRodrigues021/hitman-coop/releases/download/v$Version/" }
+$WhatsNew = Join-Path $Root "installer\WHATSNEW.txt"
+if (-not (Test-Path $WhatsNew)) { throw "installer\WHATSNEW.txt (what's new in $Version, shown in game after an update) is missing." }
+$Notes = (Get-Content $WhatsNew -Raw -Encoding UTF8).Trim()
+if ($Notes -notmatch [regex]::Escape($Version)) { throw "installer\WHATSNEW.txt doesn't mention ${Version}: write what's new in it first." }
+
+$Update = Join-Path $OutDir "update-$Version"
+Remove-Item $Update -Recurse -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force $Update | Out-Null
+$Files = (Resolve-Path (Join-Path $Stage "files")).Path.TrimEnd("\")
+$Lines = @("version $Version", "base $UpdateBase")
+$Names = @{}
+
+foreach ($Item in Get-ChildItem $Files -Recurse -File) {
+    $Rel = $Item.FullName.Substring($Files.Length + 1).Replace("\", "/")
+    if (-not (Test-Path (Join-Path $Files $Rel)) -or $Rel -notmatch '^[A-Za-z0-9_./-]+$') { throw "Bad update path '$Rel' for $($Item.FullName)." }
+    if ($Names.ContainsKey($Item.Name)) { throw "Two update files are called $($Item.Name): release assets need unique names." }
+    $Names[$Item.Name] = $true
+    Copy-Item $Item.FullName (Join-Path $Update $Item.Name)
+    $Lines += "file $Rel $($Item.Length) $((Get-FileHash -Algorithm SHA256 $Item.FullName).Hash.ToLowerInvariant())"
+}
+
+$Lines += "notes"
+$Text = ($Lines -join "`n") + "`n" + ($Notes -replace "`r", "") + "`n"
+[System.IO.File]::WriteAllText((Join-Path $Update "update.txt"), $Text, (New-Object System.Text.UTF8Encoding $false))
+Write-Host "Update files in $Update ($($Names.Count) files + update.txt)"

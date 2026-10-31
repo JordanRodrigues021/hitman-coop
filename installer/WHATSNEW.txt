@@ -1,0 +1,8 @@
+HITMAN Co-op 0.13.0
+
+- Made for game version 3.290.1. The mod loader it comes with (ZHMModSDK) is updated to 4.2.1, which knows the new game version.
+- Picking up, dropping and carrying items is shared again. The game update had moved its list of items, so the mod couldn't see any.
+- Outfit changes show on your partner's screen again, and they see your 47 in the right clothes.
+- Taking a disguise off a body now shows on your partner's screen too.
+- Bodies your partner hides are now also hidden from the guards in your game.
+- HITMAN Co-op now updates itself: new versions download when the game starts and are used the next time you start it. You can turn this off in CO-OP > About.

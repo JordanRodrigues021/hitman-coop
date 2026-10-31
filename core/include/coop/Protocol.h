@@ -14,7 +14,7 @@ namespace coop {
 // 9: chat, marks, loading notices, knock-outs, compact NPC snapshots.
 // 10: player status (alerts, menus, mission stats), mark kinds, what a loading partner loads.
 // 11: the host's mod version in Welcome, a player's colour and "away" in their status.
-constexpr uint32_t kProtocolVersion = 12;
+constexpr uint32_t kProtocolVersion = 13;
 
 constexpr uint16_t kDefaultPort = 47047;
 constexpr size_t kMaxPacketSize = 1200;

@@ -30,7 +30,7 @@ jobs:
         steps:
             -   uses: actions/checkout@v4
 
-            -   name: Fetch pinned ZHMModSDK v4.1.1 (SHA-256 checked)
+            -   name: Fetch pinned ZHMModSDK v4.2.1 (SHA-256 checked)
                 shell: pwsh
                 run: ./tools/fetch-sdk.ps1
 

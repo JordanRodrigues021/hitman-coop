@@ -3,6 +3,39 @@
 All notable changes to HITMAN Co-op, created by **Jordan Rodrigues**.
 Both players always need the same version.
 
+## 0.13.0 (2026-10-31)
+
+Game version 3.290.1 moved things around inside the game, and a lot of the mod quietly stopped
+working on it. This version is made for 3.290.1. **Both players need 0.13.0** (it can't play with
+0.12.x).
+
+**Fixed**
+- **Items weren't shared at all**: picking up, dropping, throwing, and what your partner holds. The
+  game update moved its list of items, so the mod saw none. It now finds the list where it is.
+- **Outfit changes didn't show on your partner's screen**, and your partner never got your outfit.
+  The mod loader HITMAN Co-op comes with, ZHMModSDK, is updated from 4.1.1 to 4.2.1, which knows
+  where 3.290.1 keeps 47's outfit.
+- **Taking a disguise off a body didn't show on your partner's screen.** The body now changes
+  clothes on both screens.
+- **Bodies your partner hid could still be found by guards in your game.** They are now also hidden
+  from the AI, not only from sight.
+
+**New**
+- **HITMAN Co-op updates itself.** When the game starts, it checks GitHub for a new version and
+  downloads only the files that changed, each checked by its SHA-256. The new version is used the
+  next time you start the game, what's new is shown on screen, and the old files are deleted. Turn
+  it off under CO-OP > About. (0.12.x can't update itself, so this one time, install 0.13.0 by hand.)
+
+**Changed**
+- Network protocol 13.
+
+**Known limits**
+- Tested on game version 3.290.1 in Paris with the test partner: items, outfits, stripped and hidden
+  bodies, and the self-update end to end. Whether guards now ignore a hidden body, the item in your
+  partner's hand while they really play, and dragged bodies couldn't be tried without a second
+  player. A body your partner drags still disappears in your game instead of moving (the game
+  doesn't let a mod move a ragdoll body).
+
 ## 0.12.2 (2026-10-31)
 
 For players who were connected, with kills, marks and NPCs shared, but couldn't see each other's

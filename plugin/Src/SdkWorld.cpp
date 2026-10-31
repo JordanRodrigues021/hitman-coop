@@ -29,6 +29,7 @@
 #include <Glacier/ZActor.h>
 #include <Glacier/ZAction.h>
 #include <Glacier/ZItem.h>
+#include <Glacier/ZInventory.h>
 #include <Glacier/ZWorldInventory.h>
 #include <Glacier/ZPhysics.h>
 #include <Glacier/ZCameraEntity.h>
@@ -165,6 +166,8 @@ void SdkWorld::OnSceneCleared() {
     m_StandInWears.clear();
     m_ToldCivilianStandIn = false;
     m_OutfitIdCache.clear(); // kits are the scene's, and their memory is reused
+    m_BodyUnseen.clear();
+    m_OutgoingEvents.clear();
     m_OutfitIdTold.clear();
     m_RigHiddenSince = -1.0;
     m_PartnerHidden = false;
@@ -2415,11 +2418,57 @@ bool SdkWorld::IsPartnerKillEvent(const std::string& p_EventJson, bool p_EvenTar
 }
 
 namespace {
+// The world inventory's item list. Game 3.290.1 put 0x40 bytes more before it than the SDK's
+// ZWorldInventory says (seen in Paris: the list at +0x70, not +0x30; the SDK's 4.2.1 headers still
+// say +0x30), and players saw no item reach their partner. So the list is taken where it looks
+// like one: a begin, end and capacity in order, a whole number of 16-byte entries.
+struct ItemList {
+    const TEntityRef<IItemBase>* begin = nullptr;
+    const TEntityRef<IItemBase>* end = nullptr;
+};
+
+bool LooksLikeList(const uint8_t* p_At, ItemList& p_Out) {
+    const auto* s_Words = reinterpret_cast<const uintptr_t*>(p_At);
+    const uintptr_t s_Begin = s_Words[0], s_End = s_Words[1], s_Cap = s_Words[2];
+    constexpr uintptr_t c_UserTop = 0x00007FFFFFFFFFFFull;
+
+    if (!s_Begin || s_Begin > c_UserTop || s_End > c_UserTop || s_Cap > c_UserTop || s_Begin > s_End || s_End > s_Cap ||
+        (s_End - s_Begin) % sizeof(TEntityRef<IItemBase>) != 0 || (s_End - s_Begin) / sizeof(TEntityRef<IItemBase>) > 100000)
+        return false;
+
+    p_Out.begin = reinterpret_cast<const TEntityRef<IItemBase>*>(s_Begin);
+    p_Out.end = reinterpret_cast<const TEntityRef<IItemBase>*>(s_End);
+    return true;
+}
+
+ItemList WorldItems(size_t* p_Offset = nullptr) {
+    ItemList s_List;
+
+    if (!Globals::WorldInventory)
+        return s_List;
+
+    const auto* s_Base = reinterpret_cast<const uint8_t*>(Globals::WorldInventory);
+    const size_t s_Sdk = offsetof(ZWorldInventory, m_aItems);
+
+    for (const size_t s_Offset : { s_Sdk, s_Sdk + 0x40 }) {
+        if (LooksLikeList(s_Base + s_Offset, s_List)) {
+            if (p_Offset)
+                *p_Offset = s_Offset;
+
+            return s_List;
+        }
+    }
+
+    return {};
+}
+
 // Items placed in the scene share their entity id across machines; a few templates are placed
 // more than once, and those ids say nothing, so they aren't synced.
 template <class F>
 void ForEachSceneItem(F&& p_Do) {
-    if (!Globals::WorldInventory)
+    const ItemList s_Items = WorldItems();
+
+    if (!s_Items.begin)
         return;
 
     std::unordered_map<uint64_t, int> s_Count;
@@ -2428,11 +2477,13 @@ void ForEachSceneItem(F&& p_Do) {
         return p_Entry.m_entityRef && p_Entry.m_entityRef.GetEntity() && p_Entry.m_entityRef->GetType();
     };
 
-    for (const auto& s_Entry : Globals::WorldInventory->m_aItems)
-        if (s_Usable(s_Entry))
-            ++s_Count[s_Entry.m_entityRef->GetType()->m_nEntityID];
+    for (auto* s_Entry = s_Items.begin; s_Entry != s_Items.end; ++s_Entry)
+        if (s_Usable(*s_Entry))
+            ++s_Count[s_Entry->m_entityRef->GetType()->m_nEntityID];
 
-    for (const auto& s_Entry : Globals::WorldInventory->m_aItems) {
+    for (auto* s_It = s_Items.begin; s_It != s_Items.end; ++s_It) {
+        const auto& s_Entry = *s_It;
+
         if (!s_Usable(s_Entry))
             continue;
 
@@ -2445,6 +2496,52 @@ void ForEachSceneItem(F&& p_Do) {
             p_Do(s_Id, s_Item, s_Entry.m_entityRef);
     }
 }
+
+// What an item of our 47's names as its owner: 47 itself, or its character or one of that's
+// subcontrollers (players saw nothing they picked up or held reach the partner: on game 3.290.1 an
+// item 47 carries didn't name 47 itself).
+struct Owner47 {
+    std::vector<const void*> refs;
+
+    Owner47() {
+        const auto s_Player = SDK()->GetLocalPlayer();
+
+        if (!s_Player || !s_Player.m_pInterfaceRef)
+            return;
+
+        refs.push_back(s_Player.m_entityRef.m_pObj);
+        const auto& s_Character = s_Player.m_pInterfaceRef->m_pCharacter;
+
+        if (!s_Character.m_entityRef)
+            return;
+
+        refs.push_back(s_Character.m_entityRef.m_pObj);
+
+        if (!s_Character.m_pInterfaceRef || !s_Character.m_pInterfaceRef->m_rSubcontrollerContainer.m_pInterfaceRef)
+            return;
+
+        const auto& s_Container = s_Character.m_pInterfaceRef->m_rSubcontrollerContainer;
+        refs.push_back(s_Container.m_entityRef.m_pObj);
+
+        for (const auto& s_Sub : s_Container.m_pInterfaceRef->m_aReferencedControllers)
+            if (s_Sub.m_entityRef)
+                refs.push_back(s_Sub.m_entityRef.m_pObj);
+    }
+
+    // -1: not ours; else which of ours (0: 47, 1: its character, 2: the container, 3+: a subcontroller).
+    int Which(const ZEntityRef& p_Owner) const {
+        if (!p_Owner)
+            return -1;
+
+        for (size_t i = 0; i < refs.size(); ++i)
+            if (refs[i] == p_Owner.m_pObj)
+                return static_cast<int>(i);
+
+        return -1;
+    }
+
+    bool Has(const ZEntityRef& p_Owner) const { return Which(p_Owner) >= 0; }
+};
 
 // Hidden: invisible and can't be picked up. Shown: both back.
 void SetItemShown(ZHM5Item* p_Item, bool p_Shown) {
@@ -2476,16 +2573,16 @@ void SdkWorld::CollectItemChanges(std::vector<coop::ItemChange>& p_Out) {
     m_NextItemScan = m_Now + 0.1;
     CollectDoorChanges(p_Out);
     CollectBodyChanges(p_Out);
-    const auto s_Player = SDK()->GetLocalPlayer();
+    const Owner47 s_Owner;
 
-    if (!s_Player)
+    if (s_Owner.refs.empty())
         return;
 
     ForEachSceneItem([&](uint64_t p_Id, ZHM5Item* p_Item, const ZEntityRef& p_Ref) {
         if (m_PeerHeldItems.contains(p_Id))
             return;
 
-        const bool s_Ours = p_Item->m_pOwner == s_Player.m_entityRef;
+        const bool s_Ours = s_Owner.Has(p_Item->m_pOwner);
         auto s_It = m_Items.find(p_Id);
 
         if (s_Ours && (s_It == m_Items.end() || !s_It->second.ours)) {
@@ -2560,7 +2657,7 @@ void SdkWorld::ApplyPeerItem(const coop::ItemChange& p_Change) {
         return;
 
     // Both took it at once: ours stays ours.
-    if (const auto s_Player = SDK()->GetLocalPlayer(); s_Player && s_Item->m_pOwner == s_Player.m_entityRef)
+    if (Owner47().Has(s_Item->m_pOwner))
         return;
 
     if (p_Change.Taken()) {
@@ -2627,6 +2724,23 @@ void SdkWorld::CollectBodyChanges(std::vector<coop::ItemChange>& p_Out) {
             s_Body.hidden = s_Actor->m_bBodyHidden;
         }
 
+        // 47 took its clothes: it wears something else now (its underwear), told to the partner.
+        if (!s_Body.outfitKnown)
+            RememberBodyOutfit(s_Body, s_Actor);
+        else if (s_Actor->m_rOutfit.m_pInterfaceRef != s_Body.kit || s_Actor->m_nOutfitCharset != s_Body.charset ||
+            s_Actor->m_nOutfitVariation != s_Body.variation) {
+            RememberBodyOutfit(s_Body, s_Actor);
+            const std::string s_Repo = s_Actor->m_rOutfit.m_pInterfaceRef ? OutfitKitToRepositoryId(s_Actor->m_rOutfit.m_pInterfaceRef) : std::string();
+
+            if (!s_Repo.empty()) {
+                m_OutgoingEvents.emplace_back("Coop_BodyOutfit", std::to_string(s_Id) + " " + s_Repo + " " + std::to_string(s_Body.charset) + " " +
+                    std::to_string(s_Body.variation));
+
+                if (m_Trace)
+                    m_Trace(std::string("body: ") + s_Actor->m_sActorName.c_str() + " now wears " + s_Repo + ", told to the partner");
+            }
+        }
+
         // Where it fell, in each game its own way (a fall takes a few seconds): nothing to tell. The
         // partner's victim moves with their stream.
         if (m_Now - s_Body.downAt < 4.0 || s_Actor == m_RemoteVictim) {
@@ -2687,20 +2801,76 @@ void SdkWorld::ApplyPeerBody(const coop::ItemChange& p_Change) {
     if (s_Actor == m_RemoteVictim)
         ReleaseRemoteVictim();
 
-    // Hidden with the game's own flag for a body in a closet or a container, so no NPC here finds
-    // it, and out of sight.
+    // Hidden with the game's own flag for a body in a closet or a container, and out of sight.
+    // Players saw guards here still find a body hidden like that: so it is also taken out of the
+    // mission as the game does with a body put away (disabled: no physics, nothing to find), and,
+    // if it stays in, made unseen to the AI (the switch the stand-in has).
     ZEntityRef s_Ref;
     s_Actor->GetID(s_Ref);
     s_Actor->m_bBodyHidden = true;
     s_Ref.SetProperty("m_bVisible", false);
+    s_Ref.SignalInputPin(ZString("Disable"));
 
     AgreeBody(p_Change.id, s_Actor);
     auto& s_Body = m_Bodies[p_Change.id];
     s_Body.hidden = true;
 
+    const auto s_Scene = Globals::Hitman5Module->m_pEntitySceneContext->m_pScene;
+
+    if (s_Actor->m_bEnabled && !s_Body.unseen && s_Scene) {
+        if (ZEntityRef s_Unseen = SpawnQn(c_PartnerUnseenJson, "HitmanCoopBodyUnseen", s_Scene.m_entityRef, m_UnseenFactories)) {
+            if (s_Unseen.SetProperty("m_rActor", TEntityRef<ZActor>(s_Ref))) {
+                s_Unseen.GetEntity()->Activate(0);
+                m_BodyUnseen.push_back(s_Unseen);
+                s_Body.unseen = true;
+            }
+        }
+    }
+
+    if (m_Trace)
+        m_Trace(std::string("body: ") + s_Actor->m_sActorName.c_str() + (s_Actor->m_bEnabled ? " still in the mission" : " taken out of the mission") +
+            (s_Body.unseen ? ", unseen to the AI" : ""));
+
     if (m_Trace)
         m_Trace(std::string("body: ") + s_Actor->m_sActorName.c_str() +
             ((p_Change.flags & coop::ItemFlag_BodyHidden) ? " put away" : " moved") + " by the partner, hidden here");
+}
+
+void SdkWorld::RememberBodyOutfit(Body& p_Body, ZActor* p_Actor) {
+    p_Body.outfitKnown = true;
+    p_Body.kit = p_Actor->m_rOutfit.m_pInterfaceRef;
+    p_Body.charset = p_Actor->m_nOutfitCharset;
+    p_Body.variation = p_Actor->m_nOutfitVariation;
+}
+
+void SdkWorld::ApplyPeerBodyOutfit(const std::string& p_Text) {
+    if (!m_InScene)
+        return;
+
+    std::istringstream s_In(p_Text);
+    uint64_t s_Id = 0;
+    std::string s_Repo;
+    int32_t s_Charset = -1, s_Variation = -1;
+
+    if (!(s_In >> s_Id >> s_Repo >> s_Charset >> s_Variation))
+        return;
+
+    ZActor* s_Actor = FindNpc(s_Id);
+    const auto* s_Kit = FindOutfitKit(s_Repo);
+
+    if (!s_Actor || !ActorDown(s_Actor) || !s_Kit || !s_Kit->m_pInterfaceRef || s_Charset < 0 ||
+        static_cast<size_t>(s_Charset) >= s_Kit->m_pInterfaceRef->m_aCharSets.size() || s_Variation < 0)
+        return;
+
+    Functions::ZActor_SetOutfit->Call(s_Actor, *s_Kit, s_Charset, s_Variation, false);
+
+    // What it wears now is agreed: not told back.
+    auto& s_Body = m_Bodies[s_Id];
+    s_Body.downAt = s_Body.downAt > 0.0 ? s_Body.downAt : m_Now;
+    RememberBodyOutfit(s_Body, s_Actor);
+
+    if (m_Trace)
+        m_Trace(std::string("body: ") + s_Actor->m_sActorName.c_str() + " now wears " + s_Repo + ", as on the partner's screen");
 }
 
 std::string SdkWorld::BodyTest(const std::string& p_Arg) {
@@ -2739,17 +2909,23 @@ std::string SdkWorld::BodyTest(const std::string& p_Arg) {
     if (p_Arg == "move" || p_Arg == "hide")
         ApplyPeerBody({ s_BestId, static_cast<uint8_t>(coop::ItemFlag_Body | (p_Arg == "hide" ? coop::ItemFlag_BodyHidden : 0)), s_BestXf });
 
+    // body strip: as if the partner took its clothes (the mission's civilian outfit, first variation).
+    if (p_Arg == "strip") {
+        const coop::OutfitDesc s_Other = StandInOutfit({});
+        ApplyPeerBodyOutfit(std::to_string(s_BestId) + " " + s_Other.repositoryId + " " + std::to_string(s_Other.charset) + " 0");
+    }
+
     return std::string("body: ") + s_Text;
 }
 
 namespace {
 // Our 47's item in hand: of the items it owns, the one being drawn. Items in its pockets are owned
 // but not drawn (their geometry hidden).
-ZHM5Item* HeldBy(const ZEntityRef& p_Owner, ZEntityRef* p_Ref = nullptr) {
+ZHM5Item* HeldBy(const Owner47& p_Owner, ZEntityRef* p_Ref = nullptr) {
     ZHM5Item* s_Held = nullptr;
 
     ForEachSceneItem([&](uint64_t, ZHM5Item* p_Item, const ZEntityRef& p_ItemRef) {
-        if (s_Held || p_Item->m_pOwner != p_Owner || !p_Item->m_rGeomentity.m_entityRef || !p_Item->m_pItemConfigDescriptor)
+        if (s_Held || !p_Owner.Has(p_Item->m_pOwner) || !p_Item->m_rGeomentity.m_entityRef || !p_Item->m_pItemConfigDescriptor)
             return;
 
         if (p_Item->m_rGeomentity.m_entityRef.GetProperty<bool>("m_bVisible").Get()) {
@@ -2774,7 +2950,7 @@ std::string SdkWorld::LocalHeldItem() const {
     const auto s_Player = SDK()->GetLocalPlayer();
 
     if (m_InScene && s_Player)
-        if (const ZHM5Item* s_Item = HeldBy(s_Player.m_entityRef))
+        if (const ZHM5Item* s_Item = HeldBy(Owner47()))
             m_HeldItem = s_Item->m_pItemConfigDescriptor->m_ItemID.ToString().c_str();
 
     return m_HeldItem;
@@ -2789,9 +2965,10 @@ std::string SdkWorld::HeldItemsTest() const {
 
     std::string s_Out;
     int s_Count = 0;
+    const Owner47 s_Owner;
 
     ForEachSceneItem([&](uint64_t p_Id, ZHM5Item* p_Item, const ZEntityRef& p_Ref) {
-        if (p_Item->m_pOwner != s_Player.m_entityRef)
+        if (!s_Owner.Has(p_Item->m_pOwner))
             return;
 
         const auto* s_Spatial = p_Ref.QueryInterface<ZSpatialEntity>();
@@ -2922,7 +3099,7 @@ std::string SdkWorld::StandInItemTest(const std::string& p_Arg) {
         s_What.clear();
 
         ForEachSceneItem([&](uint64_t, ZHM5Item* p_Item, const ZEntityRef&) {
-            if (s_What.empty() && s_Player && p_Item->m_pOwner == s_Player.m_entityRef && p_Item->m_pItemConfigDescriptor)
+            if (s_What.empty() && s_Player && Owner47().Has(p_Item->m_pOwner) && p_Item->m_pItemConfigDescriptor)
                 s_What = p_Item->m_pItemConfigDescriptor->m_ItemID.ToString().c_str();
         });
     }
@@ -3290,6 +3467,47 @@ std::string SdkWorld::DoorTest() {
     return s_Out;
 }
 
+// Test channel: items that have an owner, and which of our 47's parts it is, if any.
+std::string SdkWorld::ItemOwnersTest() const {
+    const Owner47 s_Owner;
+    std::string s_Out = "items: 47's parts " + std::to_string(s_Owner.refs.size());
+    int s_Total = 0, s_Owned = 0, s_Listed = 0;
+
+    ForEachSceneItem([&](uint64_t, ZHM5Item* p_Item, const ZEntityRef&) {
+        ++s_Total;
+
+        if (!p_Item->m_pOwner)
+            return;
+
+        ++s_Owned;
+
+        if (s_Listed++ >= 14)
+            return;
+
+        char s_Line[200];
+        std::snprintf(s_Line, sizeof(s_Line), " | %s owner %p (%s)", p_Item->m_pItemConfigDescriptor ? p_Item->m_pItemConfigDescriptor->m_sTitle.c_str() : "?",
+            static_cast<const void*>(p_Item->m_pOwner.m_pObj), s_Owner.Which(p_Item->m_pOwner) < 0 ? "not ours" : ("ours #" + std::to_string(s_Owner.Which(p_Item->m_pOwner))).c_str());
+        s_Out += s_Line;
+    });
+
+    // Where the scan stops, if it finds nothing: the world inventory, the list in it, usable entries.
+    size_t s_Offset = 0, s_Usable = 0, s_Items = 0;
+    const ItemList s_List = WorldItems(&s_Offset);
+
+    for (auto* s_Entry = s_List.begin; s_Entry != s_List.end; ++s_Entry) {
+        if (s_Entry->m_entityRef && s_Entry->m_entityRef.GetEntity() && s_Entry->m_entityRef->GetType()) {
+            ++s_Usable;
+            s_Items += s_Entry->m_entityRef.QueryInterface<ZHM5Item>() ? 1 : 0;
+        }
+    }
+
+    char s_Counts[200];
+    std::snprintf(s_Counts, sizeof(s_Counts), " | inventory %p: list at +0x%zx, %zu entries, %zu usable, %zu items", static_cast<void*>(Globals::WorldInventory),
+        s_Offset, static_cast<size_t>(s_List.end - s_List.begin), s_Usable, s_Items);
+    return s_Out + " | " + std::to_string(s_Owned) + " of " + std::to_string(s_Total) + " items have an owner" + s_Counts + " | words" +
+        (Globals::WorldInventory ? RigScan::Words(Globals::WorldInventory, 0x140) : std::string(" -"));
+}
+
 std::string SdkWorld::ItemTest(bool p_Take) {
     coop::Transform s_Local;
 
@@ -3354,6 +3572,8 @@ void SdkWorld::OnPeerMissionEvent(const std::string& p_Name, const std::string& 
     }
     else if (p_Name == "Coop_Challenge" && m_ToastChallenges)
         NotifyAs(ToastKind::Partner, m_PartnerName + " completed a challenge: " + coop::GameEvents::PlainText(p_Json, 60) + ".");
+    else if (p_Name == "Coop_BodyOutfit")
+        ApplyPeerBodyOutfit(p_Json);
     else if (p_Name == "Coop_Ping") {
         Pulse();
         NotifyAs(ToastKind::Partner, m_PartnerName + " is looking for you: follow the arrow.");

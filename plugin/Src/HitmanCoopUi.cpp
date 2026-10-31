@@ -400,6 +400,44 @@ void HitmanCoop::DrawCountdown() {
 }
 
 // The mission's end: both players side by side, for half a minute.
+// What's new in the version the mod just updated itself to: for a while on its first start.
+void HitmanCoop::DrawWhatsNew() {
+    std::string s_Notes;
+
+    {
+        std::lock_guard s_Lock(m_StatusMutex);
+        s_Notes = m_WhatsNew;
+    }
+
+    if (s_Notes.empty() || m_HideOverlay)
+        return;
+
+    if (m_WhatsNewAt < 0.0)
+        m_WhatsNewAt = Now();
+
+    if (Now() - m_WhatsNewAt > 45.0)
+        return;
+
+    const ImGuiViewport* s_View = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(s_View->Pos.x + s_View->Size.x * 0.5f, s_View->Pos.y + 60.f), ImGuiCond_Always, ImVec2(0.5f, 0.f));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(0.f, 0.f), ImVec2(std::min(640.f * m_HudScale, s_View->Size.x - 40.f), s_View->Size.y * 0.6f));
+    ImGui::SetNextWindowBgAlpha(0.85f);
+
+    if (ImGui::Begin("##HitmanCoopWhatsNew", nullptr,
+            ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+            ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoSavedSettings)) {
+        ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * m_HudScale);
+        ImGui::TextColored(c_Red, ICON_MD_SYSTEM_UPDATE " HITMAN CO-OP UPDATED TO %s", c_ModVersion);
+        ImGui::PushTextWrapPos(std::min(620.f * m_HudScale, s_View->Size.x - 60.f));
+        ImGui::TextUnformatted(s_Notes.c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::TextDisabled("Also in CO-OP > About.");
+        ImGui::PopFont();
+    }
+
+    ImGui::End();
+}
+
 void HitmanCoop::DrawSummary() {
     Summary s_Summary;
 
@@ -1388,6 +1426,38 @@ void HitmanCoop::DrawAboutTab(const coop::SessionStatus& p_Status) {
     ImGui::TextWrapped("3. The other types the code under \"Join a friend\" and clicks JOIN. They're taken into the host's mission.");
     ImGui::TextWrapped("4. Mark with the middle mouse button, chat in the Chat tab, use the number pad for quick messages. See Hotkeys.");
 
+    SectionTitle(ICON_MD_SYSTEM_UPDATE " Updates");
+
+    if (ImGui::Checkbox("Update automatically", &m_AutoUpdate))
+        SaveSettings();
+
+    HelpMarker("When the game starts, HITMAN Co-op checks its GitHub page for a new version and downloads it by itself. "
+        "It starts the next time you start the game. Nothing else is sent anywhere.");
+    {
+        const Updater::Status s_Update = m_Updater.Get();
+        const char* s_Text = s_Update.state == Updater::State::Checking ? "Checking for a new version..." :
+            s_Update.state == Updater::State::UpToDate ? "You have the latest version." :
+            s_Update.state == Updater::State::Staged ? "A new version is downloaded: it starts the next time you start the game." :
+            s_Update.state == Updater::State::Failed ? "Couldn't check for a new version this time." :
+            m_AutoUpdate ? "Checks when the game starts." : "Off: get new versions from the GitHub page.";
+        ImGui::TextDisabled("%s%s%s", s_Text, s_Update.state == Updater::State::Staged ? " Version " : "",
+            s_Update.state == Updater::State::Staged ? s_Update.version.c_str() : "");
+    }
+
+    {
+        std::string s_Notes;
+
+        {
+            std::lock_guard s_Lock(m_StatusMutex);
+            s_Notes = m_WhatsNew;
+        }
+
+        if (!s_Notes.empty()) {
+            ImGui::Text("What's new in %s:", c_ModVersion);
+            ImGui::TextWrapped("%s", s_Notes.c_str());
+        }
+    }
+
     SectionTitle(ICON_MD_BUILD " Support");
 
     if (ImGui::Button(ICON_MD_BUG_REPORT " Copy diagnostics"))
@@ -1536,6 +1606,7 @@ void HitmanCoop::OnDrawUI(bool p_HasFocus) {
     DrawRadar(s_Overlay, s_Status, m_HudBottom);
     DrawCountdown();
     DrawSummary();
+    DrawWhatsNew();
     DrawToasts();
 
     // The ping, twice a second, for the graph in Connection details.

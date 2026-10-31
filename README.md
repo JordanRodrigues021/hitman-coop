@@ -51,6 +51,8 @@ countdown for the perfect double hit.
   game too, so your guards don't find it.
 - Shared doors and items: what your partner picks up disappears for you; what they drop or throw
   lands where it lands. What your partner holds shows in their stand-in's hand.
+- Updates itself: a new version downloads in the background when the game starts and is used the
+  next time you start it, with what's new shown on screen. The files it replaces are cleaned up.
 - Pause together, restart together, and start together (your mission waits while your partner's
   game is still loading in).
 - Your partner's stand-in is invisible to the AI and can't be hurt: their own game decides what
@@ -91,8 +93,9 @@ countdown for the perfect double hit.
 - Both players need the **same version of HITMAN Co-op**.
 - You play together at a location **you both own** (a friend with only some locations can play
   those with you). The mod never takes anyone to a location they didn't start themselves.
-- Tested on game version 3.280.0. After a game update, the mod may need an update too: if the game
-  build doesn't have what co-op needs, co-op stays off instead of breaking anything.
+- Made for and tested on game version 3.290.1. After a game update, the mod may need an update too
+  (it updates itself when one is out): if the game build doesn't have what co-op needs, co-op stays
+  off instead of breaking anything.
 
 ## Install
 
@@ -244,6 +247,8 @@ doesn't change or replace any game files. It's still a mod, so read the [disclai
 
 **Does it break the always-online features?** No. The mod never talks to IO Interactive's servers:
 co-op runs over its own connection (Tailscale, LAN or a join code), and your game logs in as usual.
+When the game starts, the mod checks this GitHub page for a new version of itself (turn that off
+under CO-OP > About > Update automatically).
 It also works with the game in offline mode. If you're worried about your online profile or
 leaderboards, play co-op offline.
 
@@ -251,6 +256,9 @@ leaderboards, play co-op offline.
 together with Peacock.
 
 ## What's new
+
+**0.13.0**: made for game version 3.290.1. Items, outfit changes, stripped bodies and hidden
+bodies are shared again, and the mod now updates itself.
 
 **0.12.2**: fixes your partner's 47 not showing at all, on both PCs, while everything else was
 shared. Also the real 0.12.1 changes: the 0.12.1 download contained 0.12.0 by mistake.

@@ -205,6 +205,7 @@ public:
     bool PartnerSpawnFailed() const { return m_PartnerSpawnFailed; }
     // For diagnostics: the stand-in's state, and why it isn't shown if it isn't.
     std::string DescribeStandIn() const;
+    std::string ItemOwnersTest() const;
     size_t LastNpcCount() const { return m_NpcsById.size(); }
     bool GetPartnerPosition(coop::Vec3& p_Out) const;
     coop::Vec3 PartnerWanted() const { return m_PartnerWanted; }
@@ -274,12 +275,24 @@ public:
         double downAt = 0.0;
         bool hidden = false;
         bool gone = false;
+        // What it wears: 47 taking its clothes changes it (the partner is told, see BodyOutfit).
+        bool outfitKnown = false;
+        const void* kit = nullptr;
+        int32_t charset = -1;
+        int32_t variation = -1;
+        bool unseen = false; // the AI "unseen" switch pointed at it (see ApplyPeerBody)
     };
     std::unordered_map<uint64_t, Body> m_Bodies;
+    std::vector<ZEntityRef> m_BodyUnseen; // the scene's, freed with it
+    void RememberBodyOutfit(Body& p_Body, ZActor* p_Actor);
     void CollectBodyChanges(std::vector<coop::ItemChange>& p_Out);
     void ApplyPeerBody(const coop::ItemChange& p_Change);
     void AgreeBody(uint64_t p_Id, ZActor* p_Actor);
     std::string BodyTest(const std::string& p_Arg);
+    // Team events the world wants sent to the partner (name, text), taken each frame.
+    std::vector<std::pair<std::string, std::string>> TakeOutgoingEvents() { return std::exchange(m_OutgoingEvents, {}); }
+    // A body's outfit changed in the partner's game (47 took its clothes): "id repositoryId charset variation".
+    void ApplyPeerBodyOutfit(const std::string& p_Text);
     // What the partner's 47 has in hand, in the stand-in's: a copy of it made here (by repository id)
     // and given to the stand-in the way the game gives NPCs their items, in its right hand.
     void SetPartnerHeldItem(const std::string& p_RepositoryId);
@@ -350,6 +363,7 @@ public:
     static SMatrix ToMatrix(const coop::Transform& p_Xf);
 
 private:
+    std::vector<std::pair<std::string, std::string>> m_OutgoingEvents;
     enum class Spawn { Done, Waiting, Failed };
 
     Spawn SpawnPartner(const coop::Transform& p_Xf);

@@ -43,8 +43,9 @@ $Deps = (& $Dumpbin /nologo /dependents $ModDll) | Where-Object { $_ -match '^\s
 $Runtime = $Deps | Where-Object { $_ -match '^(vcruntime|msvcp|ucrtbase|api-ms-win-crt|concrt)' }
 Check (-not $Runtime) "no Visual C++ runtime dependency ($($Deps -join ', '))"
 
-# The SDK's own mods import ZHMModSDK, KERNEL32, USER32, SHELL32 and IMM32 (ImGui) too.
-$Allowed = "ZHMModSDK.dll", "KERNEL32.dll", "USER32.dll", "WS2_32.dll", "VERSION.dll", "ADVAPI32.dll", "SHELL32.dll", "IMM32.dll", "ole32.dll"
+# The SDK's own mods import ZHMModSDK, KERNEL32, USER32, SHELL32 and IMM32 (ImGui) too. WINHTTP
+# and bcrypt (Windows' own, on every PC) are the self-updater's download and SHA-256.
+$Allowed = "ZHMModSDK.dll", "KERNEL32.dll", "USER32.dll", "WS2_32.dll", "VERSION.dll", "ADVAPI32.dll", "SHELL32.dll", "IMM32.dll", "ole32.dll", "WINHTTP.dll", "bcrypt.dll"
 $Unknown = $Deps | Where-Object { $_ -notin $Allowed }
 Check (-not $Unknown) "depends only on the SDK and Windows DLLs$(if ($Unknown) { ': unexpected ' + ($Unknown -join ', ') })"
 

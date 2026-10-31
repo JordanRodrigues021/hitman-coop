@@ -161,6 +161,11 @@ void HitmanCoop::Init() {
     }
 }
 
+std::string HitmanCoop::GameFolder() {
+    std::string s_Mods = ModsFolder();
+    return s_Mods.substr(0, s_Mods.size() - std::string("mods\\").size());
+}
+
 void HitmanCoop::OnEngineInitialized() {
     // Checked once the engine is up: some of these (the type registry) only exist from then on.
     m_Unsupported = MissingEngineParts();
@@ -262,6 +267,9 @@ void HitmanCoop::LoadSettings() {
     if (m_LocalBubble > 7.99f && m_LocalBubble < 8.01f)
         m_LocalBubble = 25.f;
 
+    m_AutoUpdate = GetSettingBool("general", "auto_update", true);
+    // Only to test an update from another place; normally the latest GitHub release.
+    m_UpdateUrl = GetSetting("general", "update_url", "https://github.com/JordanRodrigues021/hitman-coop/releases/latest/download/update.txt").c_str();
     m_ShowToasts = GetSettingBool("general", "show_notifications", true);
     m_ShowHud = GetSettingBool("general", "show_hud", true);
     m_ShowNameTag = GetSettingBool("general", "show_name_tag", true);
@@ -391,6 +399,7 @@ void HitmanCoop::SaveSettings() {
     SetSettingBool("general", "show_notifications", m_ShowToasts);
     SetSettingBool("general", "show_hud", m_ShowHud);
     SetSettingBool("general", "show_name_tag", m_ShowNameTag);
+    SetSettingBool("general", "auto_update", m_AutoUpdate);
     SetSettingBool("general", "show_marks", m_ShowMarks);
     SetSettingBool("general", "pause_together", m_PauseTogether);
     SetSettingBool("general", "auto_reconnect", m_AutoReconnect);
@@ -1138,6 +1147,44 @@ void HitmanCoop::OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent) {
         if (!m_PreviousCrash.empty())
             m_World.NotifyAs(SdkWorld::ToastKind::Warning, "The game closed with an error last time. If co-op was running, "
                 "please send " + m_PreviousCrash + " to the mod's author.");
+
+        // The files the last update replaced, and what's new in it if this is its first start.
+        const std::string s_Game = GameFolder();
+        Updater::CleanUp(s_Game);
+
+        if (std::string s_Notes; Updater::TakeWhatsNew(s_Game, c_ModVersion, s_Notes)) {
+            {
+                std::lock_guard s_Lock(m_StatusMutex);
+                m_WhatsNew = s_Notes;
+            }
+
+            m_World.Notify(std::string("HITMAN Co-op updated itself to ") + c_ModVersion + ". What's new is on screen, and in CO-OP > About.");
+            AppendLog(std::string("update: now ") + c_ModVersion);
+            m_Test.Trace(std::string("update: now ") + c_ModVersion + ", what's new: " + s_Notes.substr(0, 200));
+        }
+
+        if (m_AutoUpdate)
+            m_Updater.Start(s_Game, c_ModVersion, m_UpdateUrl);
+    }
+
+    // An update found and downloaded (or not): told once.
+    if (const Updater::Status s_Update = m_Updater.Get(); s_Update.state != m_UpdateTold) {
+        m_UpdateTold = s_Update.state;
+        const std::string s_Line = "update: " + std::string(s_Update.state == Updater::State::Checking ? "checking" :
+            s_Update.state == Updater::State::UpToDate ? "up to date (latest " + s_Update.version + ")" :
+            s_Update.state == Updater::State::Staged ? s_Update.version + " downloaded, used from the next start" :
+            s_Update.state == Updater::State::Failed ? "failed: " + s_Update.error : "idle");
+        AppendLog(s_Line);
+        m_Test.Trace(s_Line);
+
+        if (s_Update.state == Updater::State::Staged)
+            m_World.Notify("HITMAN Co-op " + s_Update.version + " is downloaded. It starts by itself the next time you start the game.");
+
+        // A new version that couldn't be put in place (a game folder Windows won't let it write to):
+        // the player gets it by hand. Not being online is no news.
+        if (s_Update.state == Updater::State::Failed && !s_Update.version.empty())
+            m_World.NotifyAs(SdkWorld::ToastKind::Warning, "HITMAN Co-op " + s_Update.version + " is out, but couldn't install itself (" + s_Update.error +
+                "). Get it from the mod's GitHub page.");
     }
 
     ProcessCommands(s_Now);
@@ -1238,6 +1285,11 @@ void HitmanCoop::OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent) {
     m_World.UpdatePauseCap();
     UpdateWaitForPartner(s_Now, m_FrameStatus);
     m_World.UpdateRestart(m_LevelState == static_cast<int>(ZLevelManager::EGameState::EGS_Playing));
+
+    // What the world tells the partner itself (a body's clothes taken).
+    for (auto& [s_Name, s_Text] : m_World.TakeOutgoingEvents())
+        if (m_FrameStatus.synced)
+            m_Session->SendMissionEvent(s_Name, s_Text);
 
     // Shots that hit the partner's stand-in: both are told, once in a while.
     if (const int s_Hits = m_FriendlyHits.exchange(0); s_Hits > 0 && s_Now - m_FriendlyToldAt > 6.0 && m_FrameStatus.synced) {
@@ -1407,6 +1459,12 @@ void HitmanCoop::RunTestChannel(double p_Now) {
             m_World.SetPartnerEnabled(s_Arg != "off");
         else if (s_Verb == "outfitunknown")
             m_World.SetOutfitUnknownTest(s_Arg != "off");
+        else if (s_Verb == "myoutfit") {
+            coop::OutfitDesc s_Outfit;
+            const bool s_Ok = m_World.GetLocalOutfit(s_Outfit);
+            m_Test.Trace("myoutfit: " + std::string(s_Ok ? "" : "can't be read ") + s_Outfit.repositoryId + " charset " + std::to_string(s_Outfit.charset) +
+                " variation " + std::to_string(s_Outfit.variation));
+        }
         else if (s_Verb == "mirror")
             m_World.SetMirror(s_Arg == "on");
         else if (s_Verb == "victimtest")
@@ -1475,6 +1533,8 @@ void HitmanCoop::RunTestChannel(double p_Now) {
             m_Test.Trace(m_World.DoorState());
         else if (s_Verb == "itemtake" || s_Verb == "itemback")
             m_Test.Trace(m_World.ItemTest(s_Verb == "itemtake"));
+        else if (s_Verb == "itemdump")
+            m_Test.Trace(m_World.ItemOwnersTest());
         else if (s_Verb == "helditems")
             m_Test.Trace(m_World.HeldItemsTest());
         else if (s_Verb == "standinitem")

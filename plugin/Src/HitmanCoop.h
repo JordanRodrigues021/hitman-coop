@@ -19,6 +19,7 @@ class ZTemplateEntityFactory;
 #include "Hotkeys.h"
 #include "SdkWorld.h"
 #include "TestChannel.h"
+#include "Updater.h"
 #include "coop/GameEvents.h"
 #include "coop/RelaySocket.h"
 #include "coop/Session.h"
@@ -234,6 +235,7 @@ private:
     void DrawCompass(const SdkWorld::Overlay& p_Overlay, const coop::SessionStatus& p_Status);
     void DrawCountdown();
     void DrawSummary();
+    void DrawWhatsNew();
     void DrawToasts();
     void DrawWindow(const coop::SessionStatus& p_Status, bool p_InMission, const std::optional<coop::RelayState>& p_Relay);
     void DrawHeader(const coop::SessionStatus& p_Status, bool p_InMission);
@@ -274,6 +276,16 @@ private:
     char m_ChatBuffer[coop::kMaxChatLen] = "";
 
     TestChannel m_Test;
+
+    // Updating by itself (see Updater). What's new in the version just updated to is shown for a
+    // while from the first frame drawn, and in About.
+    Updater m_Updater;
+    bool m_AutoUpdate = true;
+    std::string m_UpdateUrl;
+    Updater::State m_UpdateTold = Updater::State::Idle;
+    std::string m_WhatsNew;
+    double m_WhatsNewAt = -1.0;
+    static std::string GameFolder();
 
     // Requests from the UI (render thread), handled on the game thread.
     struct Command {

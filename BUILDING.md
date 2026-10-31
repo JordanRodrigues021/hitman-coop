@@ -10,7 +10,7 @@
 ## Steps
 
 ```powershell
-# 1. Download ZHMModSDK v4.1.1 (developer package + release) and DirectX-Headers, check SHA-256
+# 1. Download ZHMModSDK v4.2.1 (developer package + release) and DirectX-Headers, check SHA-256
 ./tools/fetch-sdk.ps1
 
 # 2. Configure and build the mod and the connection test against the developer package
@@ -22,9 +22,21 @@ cmake --install _build --config RelWithDebInfo --prefix _build/install
 ./tools/check-dll.ps1
 
 # 4. Make the player downloads in _dist/: the zip and the one-file HitmanCoop-Setup-<version>.exe
-#    (the setup is compiled with the C# compiler that ships with Windows; no extra install)
+#    (the setup is compiled with the C# compiler that ships with Windows; no extra install), and
+#    _dist/update-<version>/ for the mod's self-update. Write installer/WHATSNEW.txt first: it is
+#    what players see in game after updating, and packaging refuses to run without this version in it.
 ./tools/package.ps1
+
+# 5. Check what was packed is what was built, at this version, for the setup, the zip and the update
+python -I tools/check-release.py <version>
 ```
+
+A release uploads the setup, the zip, their `.sha256` files, and everything in
+`_dist/update-<version>/` (`update.txt` and the game files under their own names). Installed mods
+read `update.txt` from the latest release when the game starts, download the files that differ,
+and use them from the next start (see `plugin/Src/Updater.h`). Every release must have them, or
+players stop getting updates. Set `update_url = <url of an update.txt>` under `[general]` in
+`HitmanCoop.ini` to try an update from somewhere else; plain http is allowed only to 127.0.0.1.
 
 To build in a default co-op server, add `-DCOOP_DEFAULT_RELAY=relay.example.com:47100` to the
 configure step. Without it, players set the server under Settings in the CO-OP window, or use
@@ -54,7 +66,7 @@ Right, A, A, A (spoiler alert), Down, Down, A.
 host's mission, circles the host's 47 in the host's disguise, and kills the NPC nearest the
 host when it gets the `kill` command.
 
-Notes on the developer package (v4.1.1):
+Notes on the developer package (v4.2.1; the game must be one it supports, 3.290.1 as of 4.2.0):
 
 - The SDK headers include `<directx/d3d12.h>` from DirectX-Headers, which the package doesn't
   ship; `fetch-sdk.ps1` pins v1.614.0.
