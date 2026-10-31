@@ -3,6 +3,32 @@
 All notable changes to HITMAN Co-op, created by **Jordan Rodrigues**.
 Both players always need the same version.
 
+## 0.13.1 (2026-10-31)
+
+Fixes from the first reports on 0.13.0. If you have 0.13.0, it updates itself the next time you
+start the game. Plays with 0.13.0 (same network protocol).
+
+**Fixed**
+- **Stripped bodies kept their clothes on your partner's screen.** The game leaves a body's outfit
+  as it is when 47 takes it, and sets it again "nude", so the mod never saw a change. It now
+  catches the game's own call and does the same in your partner's game.
+- **A guard arresting you could freeze halfway, and the game crashed.** When you stand next to your
+  partner, the host's game runs the NPCs around you both. A guard arresting, hunting or fighting
+  you is now run by your own game, wherever you stand, until it calms down.
+- **A body your partner put in a container could still be dragged in your game**, with its
+  knock-out stars over it, and guards noticed it while it was dragged. It can't be dragged or
+  grabbed any more, and the stars are gone.
+- **Items your partner took from a table stayed there in your game** (like the ones at the start
+  of Freeform Training). Those are drawn another way, which is now hidden too.
+
+**Known limits**
+- A body your partner drags still disappears in your game instead of moving (the game doesn't let
+  a mod move a ragdoll body).
+- A crash when leaving a mission was reported, without its crash file, and couldn't be reproduced
+  here. If it happens to you, please send `Retail\mods\HitmanCoop-crash.txt`.
+- Tested on game version 3.290.1 in Paris with the test partner; the arrest fix by the tests of
+  the mod's core, as it needs two real players.
+
 ## 0.13.0 (2026-10-31)
 
 Game version 3.290.1 moved things around inside the game, and a lot of the mod quietly stopped

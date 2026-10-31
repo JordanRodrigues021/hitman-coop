@@ -2548,6 +2548,11 @@ void SetItemShown(ZHM5Item* p_Item, bool p_Shown) {
     if (p_Item->m_rGeomentity.m_entityRef)
         p_Item->m_rGeomentity.m_entityRef.SetProperty("m_bVisible", p_Shown);
 
+    // Some placed items are drawn through this switch rather than their geometry (players saw the
+    // ones on the table at the start of Freeform Training stay after the partner took them).
+    if (p_Item->m_rItemVisible.m_entityRef)
+        p_Item->m_rItemVisible.m_entityRef.SetProperty("m_bValue", p_Shown);
+
     if (p_Item->m_rItemPickupEnabled.m_entityRef)
         p_Item->m_rItemPickupEnabled.m_entityRef.SetProperty("m_bValue", p_Shown);
 }
@@ -2724,7 +2729,17 @@ void SdkWorld::CollectBodyChanges(std::vector<coop::ItemChange>& p_Out) {
             s_Body.hidden = s_Actor->m_bBodyHidden;
         }
 
-        // 47 took its clothes: it wears something else now (its underwear), told to the partner.
+        // Put away in the partner's game: nothing to drag here and no knock-out icon over it (players
+        // dragged the invisible body, and guards saw it while it was dragged). The game may set
+        // these again, so on every scan.
+        if (s_Body.peerHidden) {
+            s_Actor->m_bUnk38 = true; // close combat blocked
+            s_Actor->m_bUnk39 = true; // drag blocked
+            s_Actor->m_bHasAIIcon = false;
+        }
+
+        // 47 took its clothes: it wears something else now, told to the partner (also told as the
+        // game does it, see OnActorOutfitSet).
         if (!s_Body.outfitKnown)
             RememberBodyOutfit(s_Body, s_Actor);
         else if (s_Actor->m_rOutfit.m_pInterfaceRef != s_Body.kit || s_Actor->m_nOutfitCharset != s_Body.charset ||
@@ -2814,6 +2829,10 @@ void SdkWorld::ApplyPeerBody(const coop::ItemChange& p_Change) {
     AgreeBody(p_Change.id, s_Actor);
     auto& s_Body = m_Bodies[p_Change.id];
     s_Body.hidden = true;
+    s_Body.peerHidden = true;
+    s_Actor->m_bUnk38 = true;
+    s_Actor->m_bUnk39 = true;
+    s_Actor->m_bHasAIIcon = false;
 
     const auto s_Scene = Globals::Hitman5Module->m_pEntitySceneContext->m_pScene;
 
@@ -2836,6 +2855,40 @@ void SdkWorld::ApplyPeerBody(const coop::ItemChange& p_Change) {
             ((p_Change.flags & coop::ItemFlag_BodyHidden) ? " put away" : " moved") + " by the partner, hidden here");
 }
 
+// 47 taking a body's clothes leaves its outfit as it was and sets it again "nude": the fields the
+// scan compares don't change (players saw stripped bodies keep their clothes on the partner's
+// screen), so the game's own call tells.
+void SdkWorld::OnActorOutfitSet(ZActor* p_Actor, ZGlobalOutfitKit* p_Kit, int32_t p_Charset, int32_t p_Variation, bool p_Nude) {
+    if (m_ApplyingBodyOutfit || !m_InScene || !p_Actor || p_Actor == m_PartnerActor || !p_Kit || !ActorDown(p_Actor))
+        return;
+
+    ZEntityRef s_Ref;
+    p_Actor->GetID(s_Ref);
+
+    if (!s_Ref || !s_Ref->GetType())
+        return;
+
+    const uint64_t s_Id = s_Ref->GetType()->m_nEntityID;
+
+    if (const auto s_It = m_NpcsById.find(s_Id); s_It == m_NpcsById.end() || s_It->second != p_Actor)
+        return;
+
+    const std::string s_Repo = OutfitKitToRepositoryId(p_Kit);
+
+    if (s_Repo.empty())
+        return;
+
+    m_OutgoingEvents.emplace_back("Coop_BodyOutfit", std::to_string(s_Id) + " " + s_Repo + " " + std::to_string(p_Charset) + " " +
+        std::to_string(p_Variation) + " " + (p_Nude ? "1" : "0"));
+
+    // The scan takes what it wears from here on, without telling it again.
+    if (const auto s_Body = m_Bodies.find(s_Id); s_Body != m_Bodies.end())
+        s_Body->second.outfitKnown = false;
+
+    if (m_Trace)
+        m_Trace(std::string("body: ") + p_Actor->m_sActorName.c_str() + (p_Nude ? " stripped" : " dressed") + " in " + s_Repo + ", told to the partner");
+}
+
 void SdkWorld::RememberBodyOutfit(Body& p_Body, ZActor* p_Actor) {
     p_Body.outfitKnown = true;
     p_Body.kit = p_Actor->m_rOutfit.m_pInterfaceRef;
@@ -2850,10 +2903,12 @@ void SdkWorld::ApplyPeerBodyOutfit(const std::string& p_Text) {
     std::istringstream s_In(p_Text);
     uint64_t s_Id = 0;
     std::string s_Repo;
-    int32_t s_Charset = -1, s_Variation = -1;
+    int32_t s_Charset = -1, s_Variation = -1, s_Nude = 0;
 
     if (!(s_In >> s_Id >> s_Repo >> s_Charset >> s_Variation))
         return;
+
+    s_In >> s_Nude; // since 0.13.1: stripped to the underwear
 
     ZActor* s_Actor = FindNpc(s_Id);
     const auto* s_Kit = FindOutfitKit(s_Repo);
@@ -2862,7 +2917,9 @@ void SdkWorld::ApplyPeerBodyOutfit(const std::string& p_Text) {
         static_cast<size_t>(s_Charset) >= s_Kit->m_pInterfaceRef->m_aCharSets.size() || s_Variation < 0)
         return;
 
-    Functions::ZActor_SetOutfit->Call(s_Actor, *s_Kit, s_Charset, s_Variation, false);
+    m_ApplyingBodyOutfit = true;
+    Functions::ZActor_SetOutfit->Call(s_Actor, *s_Kit, s_Charset, s_Variation, s_Nude != 0);
+    m_ApplyingBodyOutfit = false;
 
     // What it wears now is agreed: not told back.
     auto& s_Body = m_Bodies[s_Id];
@@ -2909,13 +2966,58 @@ std::string SdkWorld::BodyTest(const std::string& p_Arg) {
     if (p_Arg == "move" || p_Arg == "hide")
         ApplyPeerBody({ s_BestId, static_cast<uint8_t>(coop::ItemFlag_Body | (p_Arg == "hide" ? coop::ItemFlag_BodyHidden : 0)), s_BestXf });
 
-    // body strip: as if the partner took its clothes (the mission's civilian outfit, first variation).
-    if (p_Arg == "strip") {
-        const coop::OutfitDesc s_Other = StandInOutfit({});
-        ApplyPeerBodyOutfit(std::to_string(s_BestId) + " " + s_Other.repositoryId + " " + std::to_string(s_Other.charset) + " 0");
+    // body strip: as 47 taking its clothes does it in our game (the game's call, so the hook tells
+    // the partner); body peerstrip: as if the partner had.
+    if ((p_Arg == "strip" || p_Arg == "peerstrip") && s_Best->m_rOutfit.m_pInterfaceRef) {
+        if (p_Arg == "strip")
+            Functions::ZActor_SetOutfit->Call(s_Best, s_Best->m_rOutfit, s_Best->m_nOutfitCharset, s_Best->m_nOutfitVariation, true);
+        else
+            ApplyPeerBodyOutfit(std::to_string(s_BestId) + " " + OutfitKitToRepositoryId(s_Best->m_rOutfit.m_pInterfaceRef) + " " +
+                std::to_string(s_Best->m_nOutfitCharset) + " " + std::to_string(s_Best->m_nOutfitVariation) + " 1");
     }
 
-    return std::string("body: ") + s_Text;
+    ZEntityRef s_Ref;
+    s_Best->GetID(s_Ref);
+
+    // body face: our 47 a step from it, facing it (characters face -Y), to take its clothes.
+    if (p_Arg == "face") {
+        if (auto s_Player = SDK()->GetLocalPlayer()) {
+            if (auto* s_Spatial = s_Player.m_entityRef.QueryInterface<ZSpatialEntity>()) {
+                SMatrix s_M = s_Spatial->GetObjectToWorldMatrix();
+                float s_Dx = s_BestXf.pos.x - s_Local.pos.x, s_Dy = s_BestXf.pos.y - s_Local.pos.y;
+                const float s_Len = std::max(0.01f, std::sqrt(s_Dx * s_Dx + s_Dy * s_Dy));
+                s_Dx /= s_Len;
+                s_Dy /= s_Len;
+                s_M.Trans.x = s_BestXf.pos.x - s_Dx * 0.9f;
+                s_M.Trans.y = s_BestXf.pos.y - s_Dy * 0.9f;
+                s_M.YAxis.x = -s_Dx; s_M.YAxis.y = -s_Dy; s_M.YAxis.z = 0.f;
+                s_M.ZAxis.x = 0.f; s_M.ZAxis.y = 0.f; s_M.ZAxis.z = 1.f;
+                s_M.XAxis.x = -s_Dy; s_M.XAxis.y = s_Dx; s_M.XAxis.z = 0.f;
+                s_Spatial->SetObjectToWorldMatrixFromEditor(s_M);
+            }
+        }
+    }
+
+    // body deactivate: taken out of the mission the way an entity is (test for a body put away).
+    if (p_Arg == "deactivate" && s_Ref.GetEntity())
+        s_Ref.GetEntity()->Deactivate(0);
+
+    // body info: what it wears, every way the actor says it, and the words around those fields.
+    std::string s_Info;
+
+    if (p_Arg == "info" || p_Arg == "deactivate") {
+        char s_Line[400];
+        std::snprintf(s_Line, sizeof(s_Line), " | kit %p (%s) repository-id %s charset %d variation %d cloth %d enabled %d activated %d",
+            static_cast<void*>(s_Best->m_rOutfit.m_pInterfaceRef),
+            s_Best->m_rOutfit.m_pInterfaceRef ? OutfitKitToRepositoryId(s_Best->m_rOutfit.m_pInterfaceRef).c_str() : "-",
+            s_Best->m_OutfitRepositoryID.ToString().c_str(), s_Best->m_nOutfitCharset, s_Best->m_nOutfitVariation, s_Best->m_bHasClothOutfit ? 1 : 0,
+            s_Best->m_bEnabled ? 1 : 0, s_Best->m_bActorActivated ? 1 : 0);
+        s_Info = s_Line;
+        s_Info += " | at 0x420" + RigScan::Words(reinterpret_cast<const uint8_t*>(s_Best) + 0x420, 0x30);
+        s_Info += " | at 0xFF0" + RigScan::Words(reinterpret_cast<const uint8_t*>(s_Best) + 0xFF0, 0x20);
+    }
+
+    return std::string("body: ") + s_Text + s_Info;
 }
 
 namespace {

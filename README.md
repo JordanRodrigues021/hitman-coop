@@ -257,6 +257,9 @@ together with Peacock.
 
 ## What's new
 
+**0.13.1**: stripped bodies, guards arresting you next to your partner, bodies hidden in
+containers and items taken from tables are fixed. Installs itself on 0.13.0.
+
 **0.13.0**: made for game version 3.290.1. Items, outfit changes, stripped bodies and hidden
 bodies are shared again, and the mod now updates itself.
 

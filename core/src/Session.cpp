@@ -8,6 +8,12 @@
 
 namespace coop {
 
+namespace {
+// Hunting, arresting or fighting (EGameTension 6 and up): after a 47, not just looking around.
+constexpr uint8_t c_ChasingTension = 6;
+}
+
+
 // NPCs that haven't moved are still resent this often, so a lost snapshot can't leave one stale forever.
 static constexpr double c_NpcRefreshInterval = 2.0;
 static constexpr float c_NpcMoveThreshold = 0.05f;
@@ -894,8 +900,14 @@ void Session::HandleMessage(const Message& p_Msg, double p_Now) {
         case MsgType::Alerts: {
             MsgAlerts s_Alerts;
 
-            if (Decode(p_Msg.payload, s_Alerts) && s_Alerts.epoch == m_Epoch && IsSynced())
+            if (Decode(p_Msg.payload, s_Alerts) && s_Alerts.epoch == m_Epoch && IsSynced()) {
                 m_World.ApplyPeerAlerts(s_Alerts.alerts);
+
+                if (m_Role == SessionRole::Host)
+                    for (const auto& s_Alert : s_Alerts.alerts)
+                        if (s_Alert.tension >= c_ChasingTension)
+                            m_ClientChasedUntil[s_Alert.id] = p_Now + 2.0;
+            }
 
             break;
         }
@@ -1353,6 +1365,7 @@ void Session::ReleasePuppets() {
     m_Puppeted.clear();
     m_Puppets.clear();
     m_NpcOwner.clear();
+    m_ClientChasedUntil.clear();
     m_NpcSent.clear();
     m_PoseSent.clear();
     m_HaveRemoteAvatar = false;
@@ -1376,7 +1389,21 @@ void Session::UpdateSharedNpcs(double p_Now) {
             std::vector<NpcOwnership> s_Changes;
 
             for (const auto& s_Npc : s_Npcs) {
-                if (!s_Npc.Alive() || KnockedOut(s_Npc) || s_Npc.tension >= 4)
+                if (!s_Npc.Alive() || KnockedOut(s_Npc))
+                    continue;
+
+                // After the client's 47 in the client's game (arresting them, say): the client's
+                // game runs it, wherever the players stand. Run here it was a puppet there, frozen
+                // halfway through the arrest, and the client's game crashed (seen with both
+                // players standing together, when everything else stays with the host).
+                if (const auto s_It = m_ClientChasedUntil.find(s_Npc.id); s_It != m_ClientChasedUntil.end() && s_It->second > p_Now) {
+                    if (OwnerOf(s_Npc.id) != NpcOwner_Client)
+                        s_Changes.push_back({ s_Npc.id, NpcOwner_Client });
+
+                    continue;
+                }
+
+                if (s_Npc.tension >= 4)
                     continue;
 
                 const float s_ToHost = Distance(s_Local.pos, s_Npc.xf.pos);

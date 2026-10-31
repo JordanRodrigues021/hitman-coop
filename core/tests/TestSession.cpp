@@ -452,6 +452,37 @@ TEST(Session_NpcsComeBackWhenThePlayersMeet) {
     CHECK(d.clientWorld.puppets.size() == d.clientWorld.npcs.size());
 }
 
+TEST(Session_NpcChasingTheClientGoesToTheClient) {
+    Duo d(39);
+    d.HostLoads(c_Miami, 10);
+    d.ClientLoads(c_Miami, 10, 0.f);
+    d.hostWorld.player.pos = FakeWorld::Center(0x1000);
+    d.clientWorld.player.pos = d.hostWorld.player.pos + Vec3 { 1.f, 0.f, 0.f };
+    d.Start();
+    REQUIRE(d.StepUntilSynced(2.0));
+    d.Step(3.0);
+
+    // Standing together: the host runs everything, the client plays puppets.
+    REQUIRE(d.hostWorld.puppets.empty());
+    REQUIRE(d.clientWorld.puppets.count(0x1001));
+
+    // A guard arrests the client's 47 in the client's game: the client runs it from then on.
+    d.clientWorld.alerts = { { 0x1001, 7 } };
+    d.Step(2.0);
+    CHECK(d.hostWorld.puppets.count(0x1001) && !d.clientWorld.puppets.count(0x1001));
+    CHECK_MSG(d.hostWorld.puppets.size() == 1, "%zu puppets on the host", d.hostWorld.puppets.size());
+
+    // Only looking around (alerted, not after them): no change for the others.
+    d.clientWorld.alerts = { { 0x1001, 7 }, { 0x1002, 4 } };
+    d.Step(2.0);
+    CHECK(!d.hostWorld.puppets.count(0x1002));
+
+    // It calms down: with the players together, it goes back to the host.
+    d.clientWorld.alerts.clear();
+    d.Step(5.0);
+    CHECK(!d.hostWorld.puppets.count(0x1001) && d.clientWorld.puppets.count(0x1001));
+}
+
 TEST(Session_PauseHoldsBothGames) {
     Duo d(35);
     d.HostLoads(c_Miami, 2);

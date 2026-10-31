@@ -93,7 +93,7 @@ public:
 
 struct SessionConfig {
     std::string playerName = "Agent";
-    std::string modVersion = "0.13.0";
+    std::string modVersion = "0.13.1";
     std::string gameVersion = "unknown";
 
     double connectTimeout = 10.0;
@@ -416,6 +416,9 @@ private:
     Transform m_RemoteAvatarLast;
     bool m_HaveRemoteAvatar = false;
     double m_NextOwnerCheck = 0.0;
+    // Host: NPCs the client's game says are after the client's 47 (hunting, arresting, fighting),
+    // and until when (the client sends its alerts a few times a second).
+    std::unordered_map<uint64_t, double> m_ClientChasedUntil;
     double m_NextNpcPoseSend = 0.0;
     uint32_t m_PuppetFrame = 0;
     std::vector<uint64_t> m_PoseIds;

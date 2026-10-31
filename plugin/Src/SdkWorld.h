@@ -281,6 +281,7 @@ public:
         int32_t charset = -1;
         int32_t variation = -1;
         bool unseen = false; // the AI "unseen" switch pointed at it (see ApplyPeerBody)
+        bool peerHidden = false; // put away in the partner's game: no drag, no knock-out icon here
     };
     std::unordered_map<uint64_t, Body> m_Bodies;
     std::vector<ZEntityRef> m_BodyUnseen; // the scene's, freed with it
@@ -291,8 +292,11 @@ public:
     std::string BodyTest(const std::string& p_Arg);
     // Team events the world wants sent to the partner (name, text), taken each frame.
     std::vector<std::pair<std::string, std::string>> TakeOutgoingEvents() { return std::exchange(m_OutgoingEvents, {}); }
-    // A body's outfit changed in the partner's game (47 took its clothes): "id repositoryId charset variation".
+    // A body's outfit changed in the partner's game (47 took its clothes): "id repositoryId charset
+    // variation nude".
     void ApplyPeerBodyOutfit(const std::string& p_Text);
+    // The game set an actor's outfit (ZActor_SetOutfit, hooked): a body's, told to the partner.
+    void OnActorOutfitSet(ZActor* p_Actor, ZGlobalOutfitKit* p_Kit, int32_t p_Charset, int32_t p_Variation, bool p_Nude);
     // What the partner's 47 has in hand, in the stand-in's: a copy of it made here (by repository id)
     // and given to the stand-in the way the game gives NPCs their items, in its right hand.
     void SetPartnerHeldItem(const std::string& p_RepositoryId);
@@ -364,6 +368,7 @@ public:
 
 private:
     std::vector<std::pair<std::string, std::string>> m_OutgoingEvents;
+    bool m_ApplyingBodyOutfit = false; // our own ZActor_SetOutfit call, not told back
     enum class Spawn { Done, Waiting, Failed };
 
     Spawn SpawnPartner(const coop::Transform& p_Xf);

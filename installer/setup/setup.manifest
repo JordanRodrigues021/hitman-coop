@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
-  <assemblyIdentity version="0.13.0.0" name="JordanRodrigues.HitmanCoop.Setup"/>
+  <assemblyIdentity version="0.13.1.0" name="JordanRodrigues.HitmanCoop.Setup"/>
   <description>HITMAN Co-op Setup, created by Jordan Rodrigues</description>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
     <security>

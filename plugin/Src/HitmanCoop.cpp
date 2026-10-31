@@ -111,6 +111,7 @@ void HitmanCoop::Init() {
     Hooks::ZEntitySceneContext_LoadScene->AddDetour(this, &HitmanCoop::OnLoadScene);
     Hooks::ZEntitySceneContext_ClearScene->AddDetour(this, &HitmanCoop::OnClearScene);
     Hooks::ZActor_YouGotHit->AddDetour(this, &HitmanCoop::OnActorHit);
+    Hooks::ZActor_SetOutfit->AddDetour(this, &HitmanCoop::OnActorSetOutfit);
     Hooks::ZKnowledge_SetGameTension->AddDetour(this, &HitmanCoop::OnSetGameTension);
     Hooks::ZAchievementManagerSimple_OnEventSent->AddDetour(this, &HitmanCoop::OnEventSent);
     Hooks::ZLevelManager_SetGameState->AddDetour(this, &HitmanCoop::OnSetGameState);
@@ -1917,6 +1918,13 @@ DEFINE_PLUGIN_DETOUR(HitmanCoop, bool, OnActorHit, IBaseCharacter* th, const SHi
     }
 
     return HookResult<bool>(HookAction::Continue());
+}
+
+// A body stripped (or dressed) in our game: the partner's game does the same (see SdkWorld).
+DEFINE_PLUGIN_DETOUR(HitmanCoop, void, OnActorSetOutfit, ZActor* th, TEntityRef<ZGlobalOutfitKit> p_Outfit, int32_t p_Charset,
+    int32_t p_Variation, bool p_Nude) {
+    m_World.OnActorOutfitSet(th, p_Outfit.m_pInterfaceRef, p_Charset, p_Variation, p_Nude);
+    return HookResult<void>(HookAction::Continue());
 }
 
 DEFINE_PLUGIN_DETOUR(HitmanCoop, void, OnSetGameTension, ZKnowledge* th, EGameTension p_Tension) {

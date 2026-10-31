@@ -70,6 +70,8 @@ private:
     std::string m_ClearedMission; // the mission a full clear left, until the next scene
     bool m_RestartTold = false;   // this restart was seen by its event, before the clear
     DECLARE_PLUGIN_DETOUR(HitmanCoop, bool, OnActorHit, IBaseCharacter* th, const SHitInfo& p_HitInfo);
+    DECLARE_PLUGIN_DETOUR(HitmanCoop, void, OnActorSetOutfit, ZActor* th, TEntityRef<ZGlobalOutfitKit> p_Outfit, int32_t p_Charset,
+        int32_t p_Variation, bool p_Nude);
     // The stand-in's alert level (its own, per NPC) is held at ambient: it never gets agitated,
     // searches, flees or fights, whatever it might still notice.
     DECLARE_PLUGIN_DETOUR(HitmanCoop, void, OnSetGameTension, ZKnowledge* th, EGameTension p_Tension);
