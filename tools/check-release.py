@@ -1,6 +1,6 @@
 # Checks a packaged release: the mod DLL and connection test inside the zip and inside the setup
 # exe's embedded payload are the ones just built, and say the version; the .sha256 files match;
-# update.txt names this version and the GitHub download place, and every file it lists is the
+# update.txt names this version and the updates branch, and every file it lists is the
 # package's own (size, SHA-256) and is in the update folder.
 # Usage: python -I tools/check-release.py <version>   (after tools/package.ps1)
 import hashlib, io, os, struct, sys, zipfile
@@ -45,9 +45,9 @@ for f in (rf'HitmanCoop-Setup-{v}.exe', rf'HitmanCoop-{v}.zip'):
 upd = rf'{dist}\update-{v}'
 text = open(os.path.join(upd, 'update.txt'), 'rb').read()
 lines = text.decode('utf-8').split('\n')
-base_ok = f'base https://github.com/JordanRodrigues021/hitman-coop/releases/download/v{v}/' in lines
+base_ok = 'base https://raw.githubusercontent.com/JordanRodrigues021/hitman-coop/updates/' in lines
 ver_ok = f'version {v}' in lines
-print('update.txt: version', ver_ok, '| base is the GitHub release', base_ok, '| CR-free', b'\r' not in text)
+print('update.txt: version', ver_ok, '| base is the updates branch', base_ok, '| CR-free', b'\r' not in text)
 ok &= base_ok and ver_ok and b'\r' not in text
 pkg_files = rf'{dist}\HitmanCoop-{v}\files'
 listed = 0

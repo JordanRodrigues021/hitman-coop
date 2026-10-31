@@ -95,9 +95,10 @@ foreach ($File in $Zip, $Setup) {
 }
 
 # The self-update: update.txt (version, each file the installer puts in the game's Retail folder
-# with its size and SHA-256, what's new) and those files under their own names, all uploaded to
-# the release. The mod reads update.txt from the latest release.
-if (-not $UpdateBase) { $UpdateBase = "https://github.com/JordanRodrigues021/hitman-coop/releases/download/v$Version/" }
+# with its size and SHA-256, what's new) and those files under their own names. update.txt goes
+# on the release (the mod reads it from the latest one); the files go on the repo's "updates"
+# branch, so the release page shows players only the setup, the zip and update.txt.
+if (-not $UpdateBase) { $UpdateBase = "https://raw.githubusercontent.com/JordanRodrigues021/hitman-coop/updates/" }
 $WhatsNew = Join-Path $Root "installer\WHATSNEW.txt"
 if (-not (Test-Path $WhatsNew)) { throw "installer\WHATSNEW.txt (what's new in $Version, shown in game after an update) is missing." }
 $Notes = (Get-Content $WhatsNew -Raw -Encoding UTF8).Trim()

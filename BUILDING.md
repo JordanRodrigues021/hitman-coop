@@ -31,12 +31,22 @@ cmake --install _build --config RelWithDebInfo --prefix _build/install
 python -I tools/check-release.py <version>
 ```
 
-A release uploads the setup, the zip, their `.sha256` files, and everything in
-`_dist/update-<version>/` (`update.txt` and the game files under their own names). Installed mods
-read `update.txt` from the latest release when the game starts, download the files that differ,
-and use them from the next start (see `plugin/Src/Updater.h`). Every release must have them, or
-players stop getting updates. Set `update_url = <url of an update.txt>` under `[general]` in
-`HitmanCoop.ini` to try an update from somewhere else; plain http is allowed only to 127.0.0.1.
+A release has three files, so players see what to download: the setup, the zip, and
+`_dist/update-<version>/update.txt` (label them; the checksums go in the release notes). The game
+files listed in `update.txt` (the rest of `_dist/update-<version>/`) go on the repo's `updates`
+branch, one commit replacing the last, with the branch's own README saying it's not for players:
+
+```powershell
+# in a fresh folder: the files of _dist/update-<version>/ except update.txt, plus that README
+git init -b updates; git add -A; git commit -m "Update files for HITMAN Co-op <version>"
+git push --force https://github.com/JordanRodrigues021/hitman-coop.git updates
+```
+
+Push the branch before publishing the release. Installed mods read `update.txt` from the latest
+release when the game starts, download the files that differ from the branch, and use them from
+the next start (see `plugin/Src/Updater.h`). Every release must have `update.txt`, or players stop
+getting updates. Set `update_url = <url of an update.txt>` under `[general]` in `HitmanCoop.ini` to
+try an update from somewhere else; plain http is allowed only to 127.0.0.1.
 
 To build in a default co-op server, add `-DCOOP_DEFAULT_RELAY=relay.example.com:47100` to the
 configure step. Without it, players set the server under Settings in the CO-OP window, or use
