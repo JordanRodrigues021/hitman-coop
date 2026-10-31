@@ -86,7 +86,8 @@ Remove-Item $Payload -Force
 
 foreach ($File in $Zip, $Setup) {
     $Hash = (Get-FileHash -Algorithm SHA256 $File).Hash.ToLowerInvariant()
-    Set-Content "$File.sha256" "$Hash  $(Split-Path -Leaf $File)"
+    # LF only, no BOM: "sha256sum -c" read the file name with the CR of a Windows line ending.
+    [System.IO.File]::WriteAllText("$File.sha256", "$Hash  $(Split-Path -Leaf $File)`n", (New-Object System.Text.UTF8Encoding $false))
     Write-Host "Packaged $File"
     Write-Host "SHA-256 $Hash"
 }
