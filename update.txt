@@ -1,0 +1,13 @@
+version 0.13.2
+base https://raw.githubusercontent.com/JordanRodrigues021/hitman-coop/updates/
+file crashpad_handler.exe 980480 8e01fe82154b7d8cce2eba5d060a44021d3d907843fc5a7d6f08117880d8b66a
+file dinput8.dll 754176 8b52eadc6b49aba4d10f8e895474e09c89528b0fa5c948ae1847b4460574f282
+file discord_game_sdk.dll 3891512 527768710ddb0953fce5eb1700c2566b6451135d76f1d0610b63907cd5ba94c5
+file ResourceLib_HM3.dll 6760448 67169dbe7025d4dbe333f50c21f9750f73d054a6ce7af02afb127325663c07bf
+file ZHMModSDK.dll 25708032 0363619143d34dc99fd6eeee84757df28151c89e4658d87460876d557a2d8028
+file mods/HitmanCoop.dll 1752576 e161bcbe91deb400a67ba4bf67f6572e49bf11c48a6fed62fc1bed2bc78ef44e
+notes
+HITMAN Co-op 0.13.2
+
+- Bodies no longer turn invisible by themselves. A body that slid or settled on its own was taken for one your partner had moved, and hidden in their game. Now only a body a player actually drags or hides counts.
+- Updates download more reliably. On some internet connections Windows couldn't reach the server GitHub sends release downloads to, so the update never came. HITMAN Co-op now gets its updates from a GitHub address that answers on those connections too.
