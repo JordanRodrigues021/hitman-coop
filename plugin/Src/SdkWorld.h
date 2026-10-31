@@ -282,6 +282,7 @@ public:
         int32_t variation = -1;
         bool unseen = false; // the AI "unseen" switch pointed at it (see ApplyPeerBody)
         bool peerHidden = false; // put away in the partner's game: no drag, no knock-out icon here
+        bool handled = false;    // dragged or dumped by our 47 since last told (only that is told)
     };
     std::unordered_map<uint64_t, Body> m_Bodies;
     std::vector<ZEntityRef> m_BodyUnseen; // the scene's, freed with it

@@ -1,6 +1,4 @@
-HITMAN Co-op 0.13.1
+HITMAN Co-op 0.13.2
 
-- Taking a disguise off a body now leaves it in its underwear on your partner's screen too.
-- A guard who arrests, hunts or fights you is now run by your own game, even when you stand next to your partner. Before, the arrest could freeze halfway and crash the game.
-- A body your partner put in a container can't be dragged in your game any more, and its knock-out stars are gone.
-- Items your partner takes from a table (like the ones at the start of Freeform Training) now disappear in your game too.
+- Bodies no longer turn invisible by themselves. A body that slid or settled on its own was taken for one your partner had moved, and hidden in their game. Now only a body a player actually drags or hides counts.
+- Updates download more reliably. On some internet connections Windows couldn't reach the server GitHub sends release downloads to, so the update never came. HITMAN Co-op now gets its updates from a GitHub address that answers on those connections too.

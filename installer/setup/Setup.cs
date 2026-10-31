@@ -27,7 +27,7 @@ namespace HitmanCoopSetup
 {
     static class Program
     {
-        public const string Version = "0.13.1";
+        public const string Version = "0.13.2";
         public const string Author = "Jordan Rodrigues";
 
         [STAThread]

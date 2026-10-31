@@ -49,9 +49,12 @@ struct Handle {
     Handle& operator=(const Handle&) = delete;
 };
 
-// GET over HTTPS (plain HTTP only to this PC, for tests), redirects followed (GitHub's release
-// downloads redirect to its file servers), at most p_Max bytes.
-bool HttpGet(const std::string& p_Url, std::string& p_Body, size_t p_Max, const std::atomic<bool>& p_Stop, std::string& p_Error) {
+// One GET over HTTPS (plain HTTP only to this PC, for tests), redirects followed (GitHub's release
+// downloads redirect to its file servers), at most p_Max bytes. p_Retry: it failed on the way
+// (no connection, broke off), not with an answer.
+bool HttpGetOnce(const std::string& p_Url, std::string& p_Body, size_t p_Max, const std::atomic<bool>& p_Stop, std::string& p_Error, bool& p_Retry) {
+    p_Retry = false;
+
     const std::wstring s_Url = Wide(p_Url);
     URL_COMPONENTS s_Parts {};
     s_Parts.dwStructSize = sizeof(s_Parts);
@@ -82,7 +85,7 @@ bool HttpGet(const std::string& p_Url, std::string& p_Body, size_t p_Max, const 
         return false;
     }
 
-    WinHttpSetTimeouts(s_Session.h, 10000, 10000, 15000, 30000);
+    WinHttpSetTimeouts(s_Session.h, 10000, 5000, 15000, 30000);
     Handle s_Connect(WinHttpConnect(s_Session.h, s_Host.c_str(), s_Parts.nPort, 0));
     Handle s_Request(s_Connect.h ? WinHttpOpenRequest(s_Connect.h, L"GET", s_Path.c_str(), nullptr, WINHTTP_NO_REFERER,
                                        WINHTTP_DEFAULT_ACCEPT_TYPES, s_Secure ? WINHTTP_FLAG_SECURE : 0)
@@ -91,6 +94,7 @@ bool HttpGet(const std::string& p_Url, std::string& p_Body, size_t p_Max, const 
     if (!s_Request.h || !WinHttpSendRequest(s_Request.h, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
         !WinHttpReceiveResponse(s_Request.h, nullptr)) {
         p_Error = "can't reach " + Narrow(s_Host) + " (" + std::to_string(GetLastError()) + ")";
+        p_Retry = true;
         return false;
     }
 
@@ -115,6 +119,7 @@ bool HttpGet(const std::string& p_Url, std::string& p_Body, size_t p_Max, const 
 
         if (!WinHttpQueryDataAvailable(s_Request.h, &s_Available)) {
             p_Error = "download broke off (" + std::to_string(GetLastError()) + ")";
+            p_Retry = true;
             return false;
         }
 
@@ -132,11 +137,31 @@ bool HttpGet(const std::string& p_Url, std::string& p_Body, size_t p_Max, const 
 
         if (!WinHttpReadData(s_Request.h, p_Body.data() + s_At, s_Available, &s_Read)) {
             p_Error = "download broke off (" + std::to_string(GetLastError()) + ")";
+            p_Retry = true;
             return false;
         }
 
         p_Body.resize(s_At + s_Read);
     }
+}
+
+// A few tries: a host's addresses come in another order on each try, and players' connections
+// can't reach every one (one of GitHub's file server addresses timed out on a player's PC while the
+// others answered; Windows' HTTP waits out the whole connect timeout on it).
+bool HttpGet(const std::string& p_Url, std::string& p_Body, size_t p_Max, const std::atomic<bool>& p_Stop, std::string& p_Error) {
+    for (int i = 0; i < 4 && !p_Stop; ++i) {
+        bool s_Retry = false;
+
+        if (HttpGetOnce(p_Url, p_Body, p_Max, p_Stop, p_Error, s_Retry))
+            return true;
+
+        if (!s_Retry)
+            return false;
+
+        Sleep(500);
+    }
+
+    return false;
 }
 
 bool ReadAll(const fs::path& p_Path, std::string& p_Out) {
@@ -320,12 +345,12 @@ bool Updater::TakeWhatsNew(const std::string& p_GameDir, const std::string& p_Ve
     return true;
 }
 
-void Updater::Start(const std::string& p_GameDir, const std::string& p_Version, const std::string& p_ManifestUrl) {
+void Updater::Start(const std::string& p_GameDir, const std::string& p_Version, const std::string& p_ManifestUrl, const std::string& p_FallbackUrl) {
     if (m_Thread.joinable())
         return;
 
     Set(State::Checking);
-    m_Thread = std::thread(&Updater::Run, this, p_GameDir, p_Version, p_ManifestUrl);
+    m_Thread = std::thread(&Updater::Run, this, p_GameDir, p_Version, p_ManifestUrl, p_FallbackUrl);
 }
 
 Updater::Status Updater::Get() const {
@@ -338,11 +363,12 @@ void Updater::Set(State p_State, const std::string& p_Version, const std::string
     m_Status = { p_State, p_Version, p_Error };
 }
 
-void Updater::Run(std::string p_GameDir, std::string p_Version, std::string p_ManifestUrl) {
+void Updater::Run(std::string p_GameDir, std::string p_Version, std::string p_ManifestUrl, std::string p_FallbackUrl) {
     std::string s_Text, s_Error;
     Manifest s_Manifest;
 
-    if (!HttpGet(p_ManifestUrl, s_Text, 256 * 1024, m_Stop, s_Error))
+    if (!HttpGet(p_ManifestUrl, s_Text, 256 * 1024, m_Stop, s_Error) &&
+        (p_FallbackUrl.empty() || !HttpGet(p_FallbackUrl, s_Text, 256 * 1024, m_Stop, s_Error)))
         return Set(State::Failed, {}, s_Error);
 
     if (!Parse(s_Text, s_Manifest))

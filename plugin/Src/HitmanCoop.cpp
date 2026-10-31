@@ -269,8 +269,10 @@ void HitmanCoop::LoadSettings() {
         m_LocalBubble = 25.f;
 
     m_AutoUpdate = GetSettingBool("general", "auto_update", true);
-    // Only to test an update from another place; normally the latest GitHub release.
-    m_UpdateUrl = GetSetting("general", "update_url", "https://github.com/JordanRodrigues021/hitman-coop/releases/latest/download/update.txt").c_str();
+    // Only to test an update from another place. Normally the repo's updates branch (GitHub's raw
+    // file server), then the latest release: on a player's connection one of the addresses of the
+    // file server GitHub sends release downloads to never answered, and Windows' HTTP always took it.
+    m_UpdateUrl = GetSetting("general", "update_url", "https://raw.githubusercontent.com/JordanRodrigues021/hitman-coop/updates/update.txt").c_str();
     m_ShowToasts = GetSettingBool("general", "show_notifications", true);
     m_ShowHud = GetSettingBool("general", "show_hud", true);
     m_ShowNameTag = GetSettingBool("general", "show_name_tag", true);
@@ -1165,7 +1167,7 @@ void HitmanCoop::OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent) {
         }
 
         if (m_AutoUpdate)
-            m_Updater.Start(s_Game, c_ModVersion, m_UpdateUrl);
+            m_Updater.Start(s_Game, c_ModVersion, m_UpdateUrl, "https://github.com/JordanRodrigues021/hitman-coop/releases/latest/download/update.txt");
     }
 
     // An update found and downloaded (or not): told once.
@@ -1182,8 +1184,10 @@ void HitmanCoop::OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent) {
             m_World.Notify("HITMAN Co-op " + s_Update.version + " is downloaded. It starts by itself the next time you start the game.");
 
         // A new version that couldn't be put in place (a game folder Windows won't let it write to):
-        // the player gets it by hand. Not being online is no news.
-        if (s_Update.state == Updater::State::Failed && !s_Update.version.empty())
+        // the player gets it by hand. Not being online, or a file not matching yet (GitHub's file
+        // server catching up for a few minutes after a release), is no news: tried again next start.
+        if (s_Update.state == Updater::State::Failed && !s_Update.version.empty() &&
+            (s_Update.error.rfind("can't write", 0) == 0 || s_Update.error.rfind("can't replace", 0) == 0))
             m_World.NotifyAs(SdkWorld::ToastKind::Warning, "HITMAN Co-op " + s_Update.version + " is out, but couldn't install itself (" + s_Update.error +
                 "). Get it from the mod's GitHub page.");
     }

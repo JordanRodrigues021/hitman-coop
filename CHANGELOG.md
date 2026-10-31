@@ -3,6 +3,22 @@
 All notable changes to HITMAN Co-op, created by **Jordan Rodrigues**.
 Both players always need the same version.
 
+## 0.13.2 (2026-10-31)
+
+If you have 0.13.0 or 0.13.1, it updates itself the next time you start the game. Plays with
+0.13.0 and 0.13.1 (same network protocol).
+
+**Fixed**
+- **Bodies turned invisible by themselves** after a short while, though nobody had hidden them, and
+  could still be dragged. A body that slid or settled on its own (each game's physics does that its
+  own way) was taken for one your partner had moved, and hidden in their game. Now only a body a
+  player actually drags, dumps or hides is shared.
+- **Updates didn't download on some internet connections.** GitHub sends release downloads to a
+  file server that, on some connections, has an address Windows can't reach, and Windows kept
+  trying that one. The mod now gets its updates from the address GitHub serves the repository's
+  files from, and tries the release only if that fails. If your 0.13.0 or 0.13.1 doesn't update by
+  itself after a couple of game starts, install 0.13.2 by hand once.
+
 ## 0.13.1 (2026-10-31)
 
 Fixes from the first reports on 0.13.0. If you have 0.13.0, it updates itself the next time you

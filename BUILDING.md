@@ -32,18 +32,23 @@ python -I tools/check-release.py <version>
 ```
 
 A release has three files, so players see what to download: the setup, the zip, and
-`_dist/update-<version>/update.txt` (label them; the checksums go in the release notes). The game
-files listed in `update.txt` (the rest of `_dist/update-<version>/`) go on the repo's `updates`
-branch, one commit replacing the last, with the branch's own README saying it's not for players:
+`_dist/update-<version>/update.txt` (label them; the checksums go in the release notes). All of
+`_dist/update-<version>/` (`update.txt` and the game files it lists) also goes on the repo's
+`updates` branch, one commit replacing the last, with the branch's own README saying it's not for
+players. Since 0.13.2 the mod reads `update.txt` from that branch first (GitHub's raw file server)
+and from the latest release only if that fails: on a player's connection Windows couldn't reach
+the server GitHub sends release downloads to. 0.13.0 and 0.13.1 read only the release's.
 
 ```powershell
-# in a fresh folder: the files of _dist/update-<version>/ except update.txt, plus that README
+# in a fresh folder: the files of _dist/update-<version>/, plus that README
 git init -b updates; git add -A; git commit -m "Update files for HITMAN Co-op <version>"
 git push --force https://github.com/JordanRodrigues021/hitman-coop.git updates
 ```
 
-Push the branch before publishing the release. Installed mods read `update.txt` from the latest
-release when the game starts, download the files that differ from the branch, and use them from
+Push the branch before publishing the release, and wait until
+`https://raw.githubusercontent.com/JordanRodrigues021/hitman-coop/updates/HitmanCoop.dll` serves
+the new file (its cache keeps the old one up to 5 minutes). Installed mods read `update.txt` when
+the game starts, download the files that differ from the branch, and use them from
 the next start (see `plugin/Src/Updater.h`). Every release must have `update.txt`, or players stop
 getting updates. Set `update_url = <url of an update.txt>` under `[general]` in `HitmanCoop.ini` to
 try an update from somewhere else; plain http is allowed only to 127.0.0.1.

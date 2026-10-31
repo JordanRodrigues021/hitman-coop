@@ -1,5 +1,5 @@
 =====================================================
-   HITMAN CO-OP 0.13.1
+   HITMAN CO-OP 0.13.2
    * created by Jordan Rodrigues *
 =====================================================
 
@@ -8,10 +8,10 @@ No IOI, Peacock, Steam or Epic servers are used: it works with the game online o
 
 INSTALL (both players, the same version)
   1. Close the game.
-  2. Run HitmanCoop-Setup-0.13.1.exe and click INSTALL.
+  2. Run HitmanCoop-Setup-0.13.2.exe and click INSTALL.
      (Windows may say "Windows protected your PC" because the file isn't signed:
      click "More info", then "Run anyway".)
-     Prefer a zip? Extract HitmanCoop-0.13.1.zip and double-click Install.bat.
+     Prefer a zip? Extract HitmanCoop-0.13.2.zip and double-click Install.bat.
   The setup finds Steam, Epic and Heroic/Legendary installs by itself, or you pick
   the game folder (the one with Retail inside; picking Retail itself works too).
   It writes what it did to Retail\HitmanCoop-install.log.

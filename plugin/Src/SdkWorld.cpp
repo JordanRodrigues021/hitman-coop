@@ -2756,6 +2756,10 @@ void SdkWorld::CollectBodyChanges(std::vector<coop::ItemChange>& p_Out) {
             }
         }
 
+        // In our 47's hands (even right after the takedown).
+        if (s_Actor != m_RemoteVictim && (s_Actor->m_bIsBeingDragged || s_Actor->m_bIsBeingDumped))
+            s_Body.handled = true;
+
         // Where it fell, in each game its own way (a fall takes a few seconds): nothing to tell. The
         // partner's victim moves with their stream.
         if (m_Now - s_Body.downAt < 4.0 || s_Actor == m_RemoteVictim) {
@@ -2773,23 +2777,28 @@ void SdkWorld::CollectBodyChanges(std::vector<coop::ItemChange>& p_Out) {
             continue;
 
         const bool s_Hidden = s_Actor->m_bBodyHidden;
-        // More than a nudge (walking into a body shifts it a little), and at rest for a moment.
-        const bool s_Moved = coop::Distance(s_Xf.pos, s_Body.agreed) > 1.5f && m_Now - s_Body.stillSince > 0.6;
+        // Dragged or dumped by our 47, more than a nudge, and at rest for a moment. A body sliding
+        // or settling by itself (each game's physics its own way) isn't news: told as moved, the
+        // partner's game hid it, and players saw bodies vanish that nobody had touched.
+        const bool s_Moved = s_Body.handled && coop::Distance(s_Xf.pos, s_Body.agreed) > 1.5f && m_Now - s_Body.stillSince > 0.6;
 
-        if (s_Hidden == s_Body.hidden && !s_Moved)
+        // Put away (or out again) only counts when our 47 did it, as for a move.
+        if ((s_Hidden == s_Body.hidden || !s_Body.handled) && !s_Moved)
             continue;
 
         s_Body.hidden = s_Hidden;
         s_Body.agreed = s_Xf.pos;
+        s_Body.handled = false;
         p_Out.push_back({ s_Id, static_cast<uint8_t>(coop::ItemFlag_Body | (s_Hidden ? coop::ItemFlag_BodyHidden : 0)), s_Xf });
 
         if (m_Trace)
             m_Trace(std::string("body: ") + s_Actor->m_sActorName.c_str() + (s_Hidden ? " put away" : " moved") + ", told to the partner");
     }
 
-    // A body the game took out of the mission (disabled) after it was put away somewhere.
+    // A body the game took out of the mission (disabled) after our 47 put it away somewhere (only
+    // then: the game takes bodies out for other reasons too).
     for (auto& [s_Id, s_Body] : m_Bodies) {
-        if (s_Body.gone || s_Body.hidden || m_NpcsById.contains(s_Id))
+        if (s_Body.gone || s_Body.hidden || !s_Body.handled || m_NpcsById.contains(s_Id))
             continue;
 
         for (const auto& s_Entry : Globals::ActorManager->m_activatedActors) {
