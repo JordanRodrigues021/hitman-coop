@@ -3,6 +3,8 @@
 **Two-player co-op for HITMAN World of Assassination.**
 Created by **Jordan Rodrigues**.
 
+[![Join the HITMAN Co-op Discord](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/rQeHdpbKUp)
+
 > **Fan-made project.** HITMAN Co-op is not made, endorsed, supported or affiliated with
 > IO Interactive. "HITMAN" and related names are trademarks of their owners. Use it at your own
 > risk: read the [disclaimer](DISCLAIMER.md) before you install it.
@@ -19,6 +21,7 @@ countdown for the perfect double hit.
 
 ## Contents
 
+- [Community and Discord](#community-and-discord)
 - [Features](#features)
 - [Requirements](#requirements)
 - [Install](#install)
@@ -36,6 +39,21 @@ countdown for the perfect double hit.
 - [Credits and licence](#credits-and-licence)
 
 ---
+
+## Community and Discord
+
+Join the **[HITMAN Co-op Discord](https://discord.gg/rQeHdpbKUp)** to:
+
+- **Find a co-op partner** by platform and region, and jump into two-player voice rooms
+- **Get install help** and **report bugs**: the fastest way to get things fixed
+- **Suggest features** and see what is being worked on
+- **Hear about new releases** the moment they are out
+- **Share clips** of your best double hits
+
+> 🏅 **Founding Team applications are open until 15 November 2026.** I am looking for moderators,
+> testers, contributors and event hosts. Everyone accepted in the founding round gets a permanent
+> Founding Team role on the server and a place in the [credits](#credits-and-licence).
+> [Apply here](https://forms.gle/vtcxvPjS4GTSKxbG9).
 
 ## Features
 
@@ -238,6 +256,8 @@ Then both players type `your.server.address:47100` as the co-op server in Settin
 - **Something went wrong**: open About and click **Copy diagnostics** (it contains no IP addresses),
   and attach `Retail\mods\HitmanCoop.log` to an issue. If the game crashed, attach
   `Retail\mods\HitmanCoop-crash.txt` too.
+- **Still stuck?** Ask in **#install-help** on the [HITMAN Co-op Discord](https://discord.gg/rQeHdpbKUp), or post a bug in
+  **#bug-reports**. Someone there has probably seen it before.
 
 ## FAQ
 
