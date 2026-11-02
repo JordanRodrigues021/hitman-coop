@@ -19,7 +19,7 @@ HITMAN Co-op is made by **Jordan Rodrigues**.
 People with the Founding Team role on my [Discord server](https://discord.gg/rQeHdpbKUp), who
 helped make the mod what it is.
 
-- **Aerial Bot**: a huge amount of bug reports and suggestions, one of the first people to join the
+- **Arealbot**: a huge amount of bug reports and suggestions, one of the first people to join the
   Discord, and offered to help moderate it too.
 
 ## Built on
