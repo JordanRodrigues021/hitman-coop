@@ -3,6 +3,14 @@
 All notable changes to HITMAN Co-op, created by **Jordan Rodrigues**.
 Both players always need the same version.
 
+## Unreleased
+
+**Added**
+- **Linux and Steam Deck installer.** The release zip now includes `installer.sh`, a native bash
+  version of the installer for HITMAN running through Proton. It finds Steam, Heroic and
+  Legendary installs, handles the mod loader and backups the same way as the Windows installer,
+  and can uninstall again. Set `WINEDLLOVERRIDES="dinput8=n,b"` if the CO-OP window doesn't appear.
+
 ## 0.13.2 (2026-10-31)
 
 If you have 0.13.0 or 0.13.1, it updates itself the next time you start the game. Plays with

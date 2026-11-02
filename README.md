@@ -95,8 +95,8 @@ colours, and there's a streamer mode that hides join codes and IP addresses.
 
 ## What you need
 
-- HITMAN World of Assassination on Steam or Epic, on Windows. The Game Pass / Microsoft Store
-  version can't be modded.
+- HITMAN World of Assassination on Steam or Epic, on Windows or on Linux/Steam Deck through
+  Proton. The Game Pass / Microsoft Store version can't be modded.
 - Both of you need the same version of HITMAN Co-op.
 - You play at a location you both own. If your friend only has some of the locations, you can play
   those together. The mod never takes anyone somewhere they didn't start themselves.
@@ -122,6 +122,24 @@ you want to check it.
 If you'd rather use a zip, download `HitmanCoop-<version>.zip`, extract it and run Install.bat.
 Uninstall.bat takes it off again. To remove it with the setup, run it again and click UNINSTALL.
 Your saves aren't touched either way.
+
+### Linux and Steam Deck
+
+HITMAN runs through Proton, so the same zip includes a native installer script. Extract
+`HitmanCoop-<version>.zip`, open a terminal in that folder and run:
+
+```bash
+bash installer.sh
+```
+
+It finds Steam, Heroic and Legendary installs by itself. Use `bash installer.sh --game "path"` to
+pick one, `bash installer.sh --list-games` to see what it found, and
+`bash installer.sh --uninstall` to remove it.
+
+If the CO-OP window doesn't appear, start the game with `WINEDLLOVERRIDES="dinput8=n,b"`: in Steam
+put `WINEDLLOVERRIDES="dinput8=n,b" %command%` in the game's Launch Options; in Heroic add
+`WINEDLLOVERRIDES` with the value `dinput8=n,b` under Environment Variables. Direct IP hosting may
+need UDP 47047 allowed in your firewall; join codes don't.
 
 ## How to play together
 

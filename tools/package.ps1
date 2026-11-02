@@ -53,6 +53,7 @@ Copy-Item $NetTest (Join-Path $Stage "Test-Connection.exe")
 Copy-Item (Join-Path $Root "installer\Install.bat") $Stage
 Copy-Item (Join-Path $Root "installer\Uninstall.bat") $Stage
 Copy-Item (Join-Path $Root "installer\installer.ps1") $Stage
+Copy-Item (Join-Path $Root "installer\installer.sh") $Stage
 Copy-Item (Join-Path $Root "installer\README.txt") $Stage
 
 Copy-Item (Join-Path $Root "LICENSE") (Join-Path $Stage "licenses\HitmanCoop-LICENSE.txt")

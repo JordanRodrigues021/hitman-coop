@@ -16,6 +16,15 @@ INSTALL (both players, the same version)
   the game folder (the one with Retail inside; picking Retail itself works too).
   It writes what it did to Retail\HitmanCoop-install.log.
 
+  On Linux / Steam Deck (Proton), extract the same zip, open a terminal in it and
+  run:
+      bash installer.sh
+  To remove it again:
+      bash installer.sh --uninstall
+  The Linux installer finds Steam, Heroic and Legendary installs by itself, or
+  use --game "/path/to/HITMAN 3". Set the Proton launch option below if the
+  CO-OP window doesn't appear.
+
 PLAY
   1. Both start the game and press ~ (the key under Esc; ^ on German keyboards).
   2. Click CO-OP in the bar at the top.
@@ -142,7 +151,8 @@ COMPATIBILITY
     didn't start themselves.
   - Another mod loader or other SDK mods already installed: the setup installs the
     loader version HITMAN Co-op needs, backs up yours, and puts it back on uninstall.
-  - Steam Deck / Linux (Proton): set the game's launch options to
+  - Steam Deck / Linux (Proton): run installer.sh from the zip (see INSTALL), and
+    set the game's launch options to
       WINEDLLOVERRIDES="dinput8=n,b" %command%
     so the mod loader is used.
 
@@ -150,9 +160,10 @@ TEST YOUR CONNECTION (no game needed)
   In the setup window, click "Test connection" (or run Test-Connection.exe).
 
 UNINSTALL
-  Run the setup again and click Uninstall (or double-click Uninstall.bat). The game
-  folder is put back exactly as it was: the mod removed, a mod loader we added
-  removed (kept if other mods need it), one we replaced restored.
+  Run the setup again and click Uninstall (or double-click Uninstall.bat). On
+  Linux, run "bash installer.sh --uninstall". The game folder is put back exactly
+  as it was: the mod removed, a mod loader we added removed (kept if other mods
+  need it), one we replaced restored.
 
 HITMAN Co-op is (c) 2026 Jordan Rodrigues, free software under the GPL v3.
 It uses ZHMModSDK by OrfeasZ. Licenses are in the licenses folder.
