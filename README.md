@@ -26,7 +26,7 @@ with (by platform and region), hop in the two-player voice rooms, get help insta
 suggest stuff and see what I'm working on. New releases get posted there first, and you can share
 clips of your best double hits. Honestly it's the quickest way to get a bug fixed.
 
-Founding Team applications are open until 15 November 2026. I'm looking for moderators, testers,
+Founding Team applications are open until 30 November 2026. I'm looking for moderators, testers,
 contributors and people to host events. Everyone who gets in during this first round keeps the
 Founding Team role on the server for good and gets added to the [credits](#founding-team).
 You can [apply here](https://forms.gle/vtcxvPjS4GTSKxbG9).
