@@ -18,10 +18,17 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ModName = "HitmanCoop"
-$Payload = Join-Path $PSScriptRoot "files"
+$Payload = Join-Path $PSScriptRoot "files"   # chosen for the game in Install-Mod (Select-Payload)
 $ManifestName = "HitmanCoop-install.json"
-$TestedGame = "3.280.0"     # the game version this build was tested on
 $LogFile = $null            # Retail\HitmanCoop-install.log once the game is known
+
+# The download has a build for each game version it supports: files\ for the current game (3.290.x),
+# files-3.280\ for players who can't update past 3.280.
+function Select-Payload([string]$Version) {
+    $Older = Join-Path $PSScriptRoot "files-3.280"
+    if ($Version -like "3.280.*" -and (Test-Path (Join-Path $Older "mods\$ModName.dll"))) { return $Older }
+    return (Join-Path $PSScriptRoot "files")
+}
 
 function Say([string]$Text) {
     Write-Host $Text
@@ -52,7 +59,10 @@ function Get-GameInfo([string]$Game) {
     $Version = "unknown"
     try {
         $Info = (Get-Item $Exe).VersionInfo
-        $Version = if ($Info.ProductVersion) { $Info.ProductVersion.Trim() } else { $Info.FileVersion.Trim() }
+        # The numbers, as the mod reads them ("3.290.1"); the text fields can be formatted any way.
+        if ($Info.FileMajorPart -or $Info.FileMinorPart) { $Version = "$($Info.FileMajorPart).$($Info.FileMinorPart).$($Info.FileBuildPart)" }
+        elseif ($Info.ProductVersion) { $Version = $Info.ProductVersion.Trim() }
+        else { $Version = $Info.FileVersion.Trim() }
     } catch {}
 
     $Store = "unknown store"
@@ -246,10 +256,6 @@ function Install-Mod([string]$Game) {
     if (-not (Test-GameDir $Game)) { throw "No Retail\HITMAN3.exe under '$Game'." }
     $Retail = Join-Path $Game "Retail"
 
-    if (-not (Test-Path (Join-Path $Payload "mods\$ModName.dll"))) {
-        throw "The installer's 'files' folder is missing. Extract the whole zip before running Install.bat."
-    }
-
     if (Get-Process -Name "HITMAN3" -ErrorAction SilentlyContinue) {
         throw "HITMAN is running. Close the game and run the installer again."
     }
@@ -259,8 +265,18 @@ function Install-Mod([string]$Game) {
     Say "---- $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') installing HITMAN Co-op"
     Say "Game: HITMAN World of Assassination $($Info.Version) ($($Info.Store)) in $Game"
 
-    if ($Info.Version -notlike "$TestedGame*") {
-        Say "Note: this build of HITMAN Co-op was tested on game version $TestedGame. On another version the mod loader checks the game when it starts and turns itself off if it doesn't fit, so the game still runs normally; get the HITMAN Co-op build made for your version then."
+    # The build for this game version: each needs its own mod loader (ZHMModSDK) and DLL.
+    $script:Payload = Select-Payload $Info.Version
+
+    if (-not (Test-Path (Join-Path $Payload "mods\$ModName.dll"))) {
+        throw "The installer's 'files' folder is missing. Extract the whole zip before running Install.bat."
+    }
+
+    $Build = if ($Payload -like "*files-3.280") { "3.280" } else { "3.290" }
+    Say "Installing the HITMAN Co-op build for game $Build.x."
+
+    if ($Info.Version -notlike "$Build*") {
+        Say "Note: there's no HITMAN Co-op build for game $($Info.Version) yet; the $Build one is installed. Co-op stays off in the game (it says so) until you update the game; the game itself runs normally."
     }
 
     # An existing mod loader: ours replaces it (the mod is built for this one), and it is backed up

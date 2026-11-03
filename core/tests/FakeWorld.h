@@ -16,6 +16,15 @@ public:
     bool IsInScene() const override { return inScene; }
     coop::SceneDesc CurrentScene() const override { return scene; }
 
+    // The session's log lines ("category: text"), the last 4000 kept (the bot runs for hours).
+    bool LogEnabled(coop::LogLevel p_Level) const override { return p_Level <= logLevel; }
+    void Log(coop::LogLevel p_Level, const char* p_Category, const std::string& p_Text) override {
+        logLines.push_back(std::string(coop::LogLevelName(p_Level)) + " " + p_Category + ": " + p_Text);
+
+        if (logLines.size() > 4000)
+            logLines.erase(logLines.begin(), logLines.begin() + 1000);
+    }
+
     bool GetLocalAvatar(coop::Transform& p_Out) const override {
         if (!inScene)
             return false;
@@ -93,6 +102,10 @@ public:
     }
 
     void SetNpcTransform(uint64_t p_Id, const coop::Transform& p_Xf) override {
+        // A puppet whose placing doesn't take (as one whose legs walk it off between placings).
+        if (unplaceable.count(p_Id))
+            return;
+
         if (auto s_It = npcs.find(p_Id); s_It != npcs.end()) {
             s_It->second.xf = p_Xf;
             npcPhase[p_Id] = PhaseFromPosition(p_Id, p_Xf.pos);
@@ -247,6 +260,9 @@ public:
     int itemResets = 0;
     std::vector<coop::NpcAlert> alerts;     // ours
     std::set<uint64_t> puppets;             // NPCs the partner runs (AI off here)
+    std::set<uint64_t> unplaceable;         // SetNpcTransform does nothing for these
+    coop::LogLevel logLevel = coop::LogLevel::Debug;
+    std::vector<std::string> logLines;
     bool paused = false;                    // our player has a pause menu open
     bool heldPaused = false;                // held paused for the partner
     int restarts = 0;                       // restarted for the partner

@@ -97,11 +97,29 @@ void Connection::Flush(double p_Now, std::vector<std::vector<uint8_t>>& p_Out) {
         s_Pending.lastSent = p_Now;
     }
 
+    // A burst bigger than one flush (a crowded mission's NPC positions, poses and the sync check in
+    // one frame) goes over the next frames instead of losing its tail every time: the same NPCs'
+    // poses were dropped tick after tick, and those NPCs slid.
     for (auto& s_Msg : m_UnreliableOut) {
-        if (s_Full || !s_Push({ s_Msg.type, false, 0, &s_Msg.payload })) {
-            s_Full = true;
+        if (s_Msg.queuedAt < 0.0)
+            s_Msg.queuedAt = p_Now;
+
+        if (p_Now - s_Msg.queuedAt > kUnreliableHold) {
+            s_Msg.sent = true; // stale: let go
             ++m_Stats.unreliableDropped;
+            continue;
         }
+
+        if (s_Full)
+            continue;
+
+        if (!s_Push({ s_Msg.type, false, 0, &s_Msg.payload })) {
+            s_Full = true;
+            ++m_Stats.unreliableDeferred;
+            continue;
+        }
+
+        s_Msg.sent = true;
     }
 
     const bool s_KeepAliveDue = m_LastSendTime < 0.0 || p_Now - m_LastSendTime >= 0.1;
@@ -109,7 +127,14 @@ void Connection::Flush(double p_Now, std::vector<std::vector<uint8_t>>& p_Out) {
     if (!s_Batch.empty() || (s_PacketsBuilt == 0 && (m_AckDirty || s_KeepAliveDue)))
         WritePacket(s_Batch, p_Now, p_Out);
 
-    m_UnreliableOut.clear();
+    // Only now: the batches pointed into these payloads until written.
+    std::erase_if(m_UnreliableOut, [](const QueuedUnreliable& m) { return m.sent; });
+
+    // Never more than a few seconds' worth (a link that can't carry what we make).
+    while (m_UnreliableOut.size() > 2048) {
+        m_UnreliableOut.pop_front();
+        ++m_Stats.unreliableDropped;
+    }
 }
 
 void Connection::WritePacket(
@@ -278,8 +303,13 @@ bool Connection::Receive(const uint8_t* p_Data, size_t p_Size, double p_Now) {
 
         if (s_Msg.reliable)
             DeliverReliable(s_Msg.id, s_Msg.type, std::move(s_Payload));
-        else if (s_IsNewest)
-            m_Inbox.push_back({ s_Msg.type, std::move(s_Payload) });
+        // A packet overtaken by a newer one used to lose all its unreliable messages: with
+        // several packets in a frame (a crowd's poses) networks often swap two, and half of some
+        // NPCs' poses never arrived (they flicked between their pose and their own legs).
+        else {
+            m_Stats.unreliableLate += s_IsNewest ? 0 : 1;
+            m_Inbox.push_back({ s_Msg.type, std::move(s_Payload), !s_IsNewest });
+        }
     }
 
     return true;

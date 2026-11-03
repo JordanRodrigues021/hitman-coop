@@ -27,6 +27,24 @@ target_include_directories(HitmanCoop PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/Src
 )
 
+# Which ZHMModSDK (and so which game version) this build is for. The normal build is 4.2.1 (game
+# 3.290.1); separate builds for players who can't update use 4.1.1 (game 3.280.x) or 4.0.0-rc.1
+# (game 3.240.x), each with that SDK's dev package (-DZHMMODSDK_DEVPKG_DIR) and its own package.
+# The code sees COOP_SDK_VERSION (40201, 40101 or 40000) and leaves out what an older SDK lacks.
+set(COOP_SDK "4.2.1" CACHE STRING "ZHMModSDK version built against: 4.2.1, 4.1.1 or 4.0.0-rc.1")
+set_property(CACHE COOP_SDK PROPERTY STRINGS "4.2.1" "4.1.1" "4.0.0-rc.1")
+
+if (COOP_SDK STREQUAL "4.2.1")
+    target_compile_definitions(HitmanCoop PRIVATE COOP_SDK_VERSION=40201 COOP_GAME_TARGET="3.290")
+elseif (COOP_SDK STREQUAL "4.1.1")
+    target_compile_definitions(HitmanCoop PRIVATE COOP_SDK_VERSION=40101 COOP_GAME_TARGET="3.280")
+elseif (COOP_SDK STREQUAL "4.0.0-rc.1")
+    target_compile_definitions(HitmanCoop PRIVATE COOP_SDK_VERSION=40000 COOP_GAME_TARGET="3.240" COOP_LEGACY_SDK=1)
+    target_compile_options(HitmanCoop PRIVATE "/FI${CMAKE_CURRENT_SOURCE_DIR}/Src/LegacySdk.h")
+else ()
+    message(FATAL_ERROR "COOP_SDK must be 4.2.1, 4.1.1 or 4.0.0-rc.1, not ${COOP_SDK}.")
+endif ()
+
 # The co-op server players get by default (set with -DCOOP_DEFAULT_RELAY=host[:port]).
 target_compile_definitions(HitmanCoop PRIVATE COOP_DEFAULT_RELAY="${COOP_DEFAULT_RELAY}")
 

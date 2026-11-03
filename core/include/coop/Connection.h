@@ -21,6 +21,9 @@ constexpr uint16_t kPacketMagic = 0x4348;
 struct Message {
     MsgType type = MsgType::Hello;
     std::vector<uint8_t> payload;
+    // Unreliable, in a packet that came after a newer one (overtaken on the way). Streams with
+    // their own timestamps (positions, poses) still use it; state that has none drops it.
+    bool late = false;
 };
 
 struct ConnectionStats {
@@ -32,6 +35,8 @@ struct ConnectionStats {
     uint64_t bytesSent = 0;
     uint64_t bytesReceived = 0;
     uint64_t unreliableDropped = 0;
+    uint64_t unreliableDeferred = 0; // didn't fit a flush, sent with the next
+    uint64_t unreliableLate = 0;     // ours received in a packet overtaken by a newer one (still delivered, marked late)
     size_t reliablePending = 0;
     // Of the partner's packets, the share that never arrived (recent, smoothed), and how much the
     // round trip varies.
@@ -44,6 +49,7 @@ public:
     static constexpr uint16_t kReliableWindow = 1024;
     static constexpr size_t kMaxPendingReliable = 8192;
     static constexpr size_t kMaxPacketsPerFlush = 16;
+    static constexpr double kUnreliableHold = 0.25;
 
     explicit Connection(Endpoint p_Remote, uint16_t p_InitialSeq = 0, uint16_t p_InitialReliableId = 0);
 
@@ -114,7 +120,15 @@ private:
     uint16_t m_NextExpectedReliable;
     std::map<uint16_t, Message> m_ReliableBuffer;
 
-    std::vector<Message> m_UnreliableOut;
+    // Unreliable messages waiting to go. One that doesn't fit this flush (kMaxPacketsPerFlush) goes
+    // with the next, unless it is older than kUnreliableHold by then (stale: dropped).
+    struct QueuedUnreliable {
+        MsgType type;
+        std::vector<uint8_t> payload;
+        double queuedAt = -1.0;
+        bool sent = false;
+    };
+    std::deque<QueuedUnreliable> m_UnreliableOut;
     std::deque<Message> m_Inbox;
 
     double m_LastSendTime = -1.0;

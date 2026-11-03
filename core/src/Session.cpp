@@ -26,19 +26,6 @@ static constexpr double c_ReplaceSilence = 2.5;
 static constexpr double c_StallGap = 1.5;
 static constexpr double c_PoseHold = 1.5; // a puppet keeps its last pose this long without a new one
 
-// Two poses alike to the eye (each bone within about half a degree, root and pelvis within 1 cm).
-static bool PosesAlike(const Pose& p_A, const Pose& p_B) {
-    if (p_A.rotations.size() != p_B.rotations.size() || Distance(p_A.rootPos, p_B.rootPos) > 0.01f ||
-        Distance(p_A.pelvisPos, p_B.pelvisPos) > 0.01f)
-        return false;
-
-    for (size_t i = 0; i < p_A.rotations.size(); ++i)
-        if (std::fabs(Dot(p_A.rotations[i], p_B.rotations[i])) < 0.99999f)
-            return false;
-
-    return true;
-}
-
 // Tools (the connection test, the bot) send no game version, so they never trigger the warning.
 static bool VersionsDiffer(const std::string& p_A, const std::string& p_B) {
     return !p_A.empty() && !p_B.empty() && p_A != p_B;
@@ -89,6 +76,9 @@ void Session::Host(std::unique_ptr<IDatagramSocket> p_Socket) {
 
     if (m_LocalInScene && ++m_Epoch == 0)
         ++m_Epoch;
+
+    Log(LogLevel::Info, "net", "hosting (mod %s, protocol %u, game %s, %s)", m_Config.modVersion.c_str(), kProtocolVersion,
+        m_Config.gameVersion.c_str(), m_LocalInScene ? "already in a mission" : "not in a mission yet");
 }
 
 void Session::Join(std::unique_ptr<IDatagramSocket> p_Socket, const Endpoint& p_Host, double p_Now) {
@@ -106,6 +96,9 @@ void Session::Join(std::unique_ptr<IDatagramSocket> p_Socket, const Endpoint& p_
     m_LocalReadyEpoch = 0;
     m_LocalInScene = m_World.IsInScene();
 
+    Log(LogLevel::Info, "net", "joining %s %s (mod %s, protocol %u, game %s)", p_Host.IsRelay() ? "through the co-op server," : "directly,",
+        p_Host.ToString().c_str(), m_Config.modVersion.c_str(), kProtocolVersion, m_Config.gameVersion.c_str());
+
     MsgHello s_Hello;
     s_Hello.modVersion = m_Config.modVersion;
     s_Hello.gameVersion = m_Config.gameVersion;
@@ -116,6 +109,8 @@ void Session::Join(std::unique_ptr<IDatagramSocket> p_Socket, const Endpoint& p_
 }
 
 void Session::Leave(const std::string& p_Reason, double p_Now) {
+    Log(LogLevel::Info, "net", "leaving: %s%s", p_Reason.c_str(), LinkSummary().c_str());
+
     if (m_Conn) {
         MsgReject s_Bye { p_Reason };
         m_Conn->SendReliable(MsgType::Disconnect, Encode(s_Bye));
@@ -151,6 +146,7 @@ void Session::KickPeer(const std::string& p_Reason, double p_Now) {
 }
 
 void Session::Fail(const std::string& p_Reason) {
+    Log(LogLevel::Warn, "net", "session ended: %s%s", p_Reason.c_str(), LinkSummary().c_str());
     ResetSceneState();
     m_Conn.reset();
     m_Socket.reset();
@@ -164,6 +160,7 @@ void Session::Fail(const std::string& p_Reason) {
 }
 
 void Session::DropPeer(const std::string& p_Reason) {
+    Log(LogLevel::Info, "net", "partner gone: %s%s", p_Reason.c_str(), LinkSummary().c_str());
     ResetSceneState();
     m_PeerScene = {};
     m_Conn.reset();
@@ -354,6 +351,7 @@ SessionStatus Session::Status() const {
 
     s_Status.npcsPuppeted = m_Puppeted.size();
     s_Status.ownerCheck = m_OwnerCheck;
+    s_Status.npcCheck = m_LastCheck;
 
     for (const auto& [s_Id, s_Owner] : m_NpcOwner)
         s_Status.npcsOwnedByClient += s_Owner == NpcOwner_Client ? 1 : 0;
@@ -399,6 +397,8 @@ uint32_t Session::SyncedEpoch() const {
 void Session::Tick(double p_Now, float p_Dt) {
     if (m_Role == SessionRole::None)
         return;
+
+    m_TickNow = p_Now;
 
     // A long gap since the last tick is our own stall (a load): what the partner sent meanwhile is
     // only being read now, so their silence isn't counted until it has been.
@@ -455,6 +455,7 @@ void Session::Tick(double p_Now, float p_Dt) {
     }
 
     if (m_State == SessionState::Connected) {
+        LogStats(p_Now);
         UpdateLink(p_Now);
         UpdatePlayerState(p_Now);
         UpdateScene();
@@ -464,6 +465,7 @@ void Session::Tick(double p_Now, float p_Dt) {
         UpdateItems();
         UpdateAlerts(p_Now);
         UpdateSharedNpcs(p_Now);
+        SendNpcCheck(p_Now);
         UpdatePause();
 
         // Walking every actor in the level is the most expensive thing the mod does, so it runs at
@@ -564,6 +566,13 @@ void Session::HandleMessage(const Message& p_Msg, double p_Now) {
         p_Msg.type != MsgType::Reject)
         return;
 
+    // Overtaken on the way: only streams that carry their own time (each value is placed on the
+    // sender's timeline, older ones than held are dropped there) take it. A player's state or the
+    // alerts would go back to what they were.
+    if (p_Msg.late && p_Msg.type != MsgType::NpcSnapshot && p_Msg.type != MsgType::NpcPose && p_Msg.type != MsgType::Pose &&
+        p_Msg.type != MsgType::AvatarState && p_Msg.type != MsgType::VictimPose && p_Msg.type != MsgType::NpcCheck)
+        return;
+
     switch (p_Msg.type) {
         case MsgType::Hello: {
             MsgHello s_Hello;
@@ -584,6 +593,11 @@ void Session::HandleMessage(const Message& p_Msg, double p_Now) {
             m_PeerName = s_Welcome.hostName;
             m_PeerGameVersion = s_Welcome.gameVersion;
             m_PeerModVersion = s_Welcome.modVersion;
+            m_ConnectedAt = p_Now;
+            m_NextStatsLog = p_Now + 10.0;
+            m_LogCount = {};
+            Log(LogLevel::Info, "net", "connected to host '%s' in %.1f s: mod %s, game %s (ours %s)", m_PeerName.c_str(),
+                p_Now - m_ConnectStart, s_Welcome.modVersion.c_str(), s_Welcome.gameVersion.c_str(), m_Config.gameVersion.c_str());
             m_Message = "Connected to " + m_PeerName + ".";
             m_World.Notify("Connected to " + m_PeerName + ".");
 
@@ -690,8 +704,11 @@ void Session::HandleMessage(const Message& p_Msg, double p_Now) {
 
             if (Decode(p_Msg.payload, s_State) && IsSynced() && s_State.epoch == m_Epoch) {
                 m_RemoteAvatar.Push(p_Now, s_State.timeMs, s_State.xf);
-                m_RemoteAvatarLast = s_State.xf;
-                m_HaveRemoteAvatar = true;
+
+                if (!p_Msg.late) {
+                    m_RemoteAvatarLast = s_State.xf;
+                    m_HaveRemoteAvatar = true;
+                }
             }
 
             break;
@@ -711,7 +728,7 @@ void Session::HandleMessage(const Message& p_Msg, double p_Now) {
         case MsgType::VictimPose: {
             MsgVictimPose s_Victim;
 
-            if (Decode(p_Msg.payload, s_Victim) && IsSynced() && s_Victim.body.epoch == m_Epoch) {
+            if (Decode(p_Msg.payload, s_Victim) && IsSynced() && s_Victim.body.epoch == m_Epoch && (!p_Msg.late || s_Victim.id == m_VictimId)) {
                 // A different NPC: start its playback afresh rather than blending between two.
                 if (s_Victim.id != m_VictimId) {
                     ResetVictim();
@@ -720,8 +737,15 @@ void Session::HandleMessage(const Message& p_Msg, double p_Now) {
 
                 m_VictimXf.Push(p_Now, s_Victim.body.timeMs, s_Victim.xf);
                 m_VictimPose.Push(p_Now, s_Victim.body.timeMs, s_Victim.body.pose);
-                m_VictimFlags = s_Victim.flags;
+
+                if (!p_Msg.late)
+                    m_VictimFlags = s_Victim.flags;
                 m_VictimLastReceive = p_Now;
+
+                // The client's 47 on a standing NPC: the client's game runs it (unless our 47 is
+                // on it too: then ours does, see UpdateSharedNpcs).
+                if (m_Role == SessionRole::Host && (s_Victim.flags & NpcFlag_Alive) && !(s_Victim.flags & NpcFlag_Pacified))
+                    m_ClientChasedUntil[s_Victim.id] = p_Now + 1.5;
             }
 
             break;
@@ -757,14 +781,30 @@ void Session::HandleMessage(const Message& p_Msg, double p_Now) {
             if (!Decode(p_Msg.payload, s_Snapshot) || s_Snapshot.epoch != m_Epoch || !IsSynced())
                 break;
 
+            ++m_LogCount.snapshotsIn;
+            m_LogCount.npcsIn += static_cast<uint32_t>(s_Snapshot.npcs.size());
+
             for (const auto& s_Npc : s_Snapshot.npcs) {
-                if (m_Role == SessionRole::Client)
+                // (A late one's state is older than what we have: only its position is placed.)
+                if (m_Role == SessionRole::Client && !p_Msg.late)
                     m_HostNpcs[s_Npc.id] = s_Npc;
 
                 // Only NPCs the sender runs are in it; one we took over since is ours to move.
-                if (OwnerOf(s_Npc.id) != MyOwner())
-                    m_Puppets[s_Npc.id].xf.Push(p_Now, s_Snapshot.timeMs, s_Npc.xf);
+                if (OwnerOf(s_Npc.id) != MyOwner()) {
+                    auto& s_Puppet = m_Puppets[s_Npc.id];
+                    s_Puppet.xf.Push(p_Now, s_Snapshot.timeMs, s_Npc.xf);
+                    s_Puppet.lastData = p_Now;
+                }
             }
+
+            break;
+        }
+
+        case MsgType::NpcCheck: {
+            MsgNpcCheck s_Check;
+
+            if (Decode(p_Msg.payload, s_Check) && s_Check.epoch == m_Epoch && IsSynced())
+                OnNpcCheck(s_Check, p_Now);
 
             break;
         }
@@ -863,22 +903,39 @@ void Session::HandleMessage(const Message& p_Msg, double p_Now) {
         }
 
         case MsgType::NpcPose: {
-            MsgVictimPose s_Pose;
+            MsgNpcPose s_Pose;
 
-            if (!Decode(p_Msg.payload, s_Pose) || s_Pose.body.epoch != m_Epoch || !IsSynced() || OwnerOf(s_Pose.id) == MyOwner())
+            if (!Decode(p_Msg.payload, s_Pose) || s_Pose.epoch != m_Epoch || !IsSynced() || OwnerOf(s_Pose.id) == MyOwner())
                 break;
 
             auto& s_Puppet = m_Puppets[s_Pose.id];
-            s_Puppet.pose.Push(p_Now, s_Pose.body.timeMs, s_Pose.body.pose);
+
+            // Older than one already laid down (packets overtake each other): its changes are stale.
+            if (s_Puppet.hasPoseTime && static_cast<int32_t>(s_Pose.timeMs - s_Puppet.poseTimeMs) <= 0)
+                break;
+
+            // Changes to a pose we haven't got (its full one lost, or the NPC new to us): wait for
+            // the next full one.
+            if (!s_Pose.ApplyTo(s_Puppet.poseNow)) {
+                ++m_LogCount.posesWaiting;
+                break;
+            }
+
+            s_Puppet.poseTimeMs = s_Pose.timeMs;
+            s_Puppet.hasPoseTime = true;
+            s_Puppet.pose.Push(p_Now, s_Pose.timeMs, s_Puppet.poseNow);
             s_Puppet.lastPose = p_Now;
+            ++m_LogCount.posesIn;
             break;
         }
 
         case MsgType::NpcDied: {
             MsgNpcDied s_Died;
 
-            if (m_Role == SessionRole::Client && Decode(p_Msg.payload, s_Died) && s_Died.epoch == m_Epoch)
+            if (m_Role == SessionRole::Client && Decode(p_Msg.payload, s_Died) && s_Died.epoch == m_Epoch) {
                 m_HostDead.insert(s_Died.id);
+                Log(LogLevel::Debug, "npc", "host says %016llx is dead", static_cast<unsigned long long>(s_Died.id));
+            }
 
             break;
         }
@@ -891,8 +948,12 @@ void Session::HandleMessage(const Message& p_Msg, double p_Now) {
                 break;
 
             // Only kill NPCs we know are alive; the death is then announced back by UpdateNpcsHost.
-            if (const auto s_It = m_HostNpcAlive.find(s_Request.id); s_It != m_HostNpcAlive.end() && s_It->second)
+            if (const auto s_It = m_HostNpcAlive.find(s_Request.id); s_It != m_HostNpcAlive.end() && s_It->second) {
+                Log(LogLevel::Debug, "npc", "client killed %016llx: killed here too", static_cast<unsigned long long>(s_Request.id));
                 m_World.KillNpc(s_Request.id);
+            }
+            else
+                Log(LogLevel::Debug, "npc", "client asked to kill %016llx, which isn't alive here", static_cast<unsigned long long>(s_Request.id));
 
             break;
         }
@@ -954,6 +1015,8 @@ void Session::HandleHello(const MsgHello& p_Hello, double p_Now) {
     }
 
     if (!s_Reason.empty()) {
+        Log(LogLevel::Warn, "net", "refused '%s' (mod %s, protocol %u, game %s): %s", p_Hello.playerName.c_str(),
+            p_Hello.modVersion.c_str(), p_Hello.protocol, p_Hello.gameVersion.c_str(), s_Reason.c_str());
         m_Conn->SendReliable(MsgType::Reject, Encode(MsgReject { s_Reason }));
         FlushTo(p_Now);
         DropPeer("Refused " + p_Hello.playerName + ": " + s_Reason);
@@ -973,6 +1036,11 @@ void Session::HandleHello(const MsgHello& p_Hello, double p_Now) {
     m_PeerReadyEpoch = 0;
     m_State = SessionState::Connected;
     m_Message = m_PeerName + " joined.";
+    m_ConnectedAt = p_Now;
+    m_NextStatsLog = p_Now + 10.0;
+    m_LogCount = {};
+    Log(LogLevel::Info, "net", "'%s' joined from %s: mod %s, game %s (ours %s)", m_PeerName.c_str(),
+        m_Conn->Remote().ToString().c_str(), p_Hello.modVersion.c_str(), p_Hello.gameVersion.c_str(), m_Config.gameVersion.c_str());
     m_World.Notify(m_PeerName + " joined.");
 
     if (VersionsDiffer(p_Hello.gameVersion, m_Config.gameVersion)) {
@@ -1063,9 +1131,12 @@ void Session::OnSyncChanged(bool p_Synced) {
         if (m_HasRemoteOutfit)
             m_World.SetRemoteOutfit(m_RemoteOutfit);
 
+        Log(LogLevel::Info, "sync", "together in the mission (epoch %u, %s)", m_Epoch, m_World.CurrentScene().scene.c_str());
         m_World.Notify("Co-op active: " + m_PeerName + " is in the mission with you.");
         return;
     }
+
+    Log(LogLevel::Info, "sync", "no longer together in a mission (epoch %u): %zu puppets released", m_Epoch, m_Puppeted.size());
 
     if (m_RemoteAvatarShown) {
         m_World.HideRemoteAvatar();
@@ -1088,6 +1159,8 @@ void Session::OnSyncChanged(bool p_Synced) {
     ResetVictim();
     m_HostNpcs.clear();
     m_NpcSent.clear();
+    m_CheckIn = {};
+    m_LastCheck = {};
 }
 
 void Session::UpdateOutfit() {
@@ -1147,8 +1220,19 @@ void Session::UpdateAvatar(double p_Now) {
             m_VictimSend.body.epoch = m_Epoch;
             m_VictimSend.body.timeMs = s_State.timeMs;
 
-            if (m_World.GetLocalVictim(m_VictimSend.id, m_VictimSend.xf, m_VictimSend.body.pose, m_VictimSend.flags))
+            if (m_World.GetLocalVictim(m_VictimSend.id, m_VictimSend.xf, m_VictimSend.body.pose, m_VictimSend.flags)) {
                 m_Conn->SendUnreliable(MsgType::VictimPose, Encode(m_VictimSend));
+
+                // Standing (not yet down): ours to run while we are on it.
+                if ((m_VictimSend.flags & NpcFlag_Alive) && !(m_VictimSend.flags & NpcFlag_Pacified)) {
+                    const bool s_New = m_VictimSend.id != m_ContactId || !InContact(m_ContactId);
+                    m_ContactId = m_VictimSend.id;
+                    m_ContactUntil = p_Now + 1.5;
+
+                    if (s_New && m_Role == SessionRole::Client)
+                        ReconcilePuppets();
+                }
+            }
         }
 
         m_NextAvatarSend = std::max(m_NextAvatarSend + m_Config.avatarInterval, p_Now);
@@ -1288,6 +1372,9 @@ void Session::UpdateLink(double p_Now) {
     if (m_StruggleChecks >= 3) {
         m_CongestedSeen = p_Now;
 
+        if (!m_Congested)
+            Log(LogLevel::Info, "net", "link struggling, sending less NPC detail:%s", LinkSummary().c_str());
+
         if (!m_Congested && IsSynced() && p_Now - m_CongestionToldAt > 60.0) {
             m_CongestionToldAt = p_Now;
             m_World.Notify("The connection is struggling: sending less NPC detail until it recovers.");
@@ -1295,8 +1382,10 @@ void Session::UpdateLink(double p_Now) {
 
         m_Congested = true;
     }
-    else if (m_Congested && p_Now - m_CongestedSeen > 4.0)
+    else if (m_Congested && p_Now - m_CongestedSeen > 4.0) {
         m_Congested = false;
+        Log(LogLevel::Info, "net", "link recovered:%s", LinkSummary().c_str());
+    }
 
     if (p_Now - m_LinkBytesAt >= 1.0) {
         if (m_LinkBytesAt > 0.0)
@@ -1323,8 +1412,29 @@ void Session::UpdatePause() {
 }
 
 void Session::SetOwners(const std::vector<NpcOwnership>& p_Changes) {
+    m_LogCount.ownerChanges += static_cast<uint32_t>(p_Changes.size());
+
+    if (!p_Changes.empty() && m_World.LogEnabled(LogLevel::Debug)) {
+        size_t s_ToClient = 0;
+        std::string s_Ids;
+
+        for (const auto& s_Change : p_Changes) {
+            s_ToClient += s_Change.owner == NpcOwner_Client ? 1 : 0;
+
+            if (s_Ids.size() < 200) {
+                char s_Id[24];
+                std::snprintf(s_Id, sizeof(s_Id), " %llx%s", static_cast<unsigned long long>(s_Change.id), s_Change.owner == NpcOwner_Client ? ">c" : ">h");
+                s_Ids += s_Id;
+            }
+        }
+
+        Log(LogLevel::Debug, "npc", "%zu NPCs change hands (%zu to the client, %zu to the host):%s%s", p_Changes.size(), s_ToClient,
+            p_Changes.size() - s_ToClient, s_Ids.c_str(), s_Ids.size() >= 200 ? " ..." : "");
+    }
+
     for (const auto& s_Change : p_Changes) {
         m_NpcOwner[s_Change.id] = s_Change.owner;
+        m_OwnerChangedAt[s_Change.id] = m_TickNow;
 
         // Ours now: what the partner streamed is stale.
         if (s_Change.owner == MyOwner())
@@ -1334,23 +1444,43 @@ void Session::SetOwners(const std::vector<NpcOwnership>& p_Changes) {
     ReconcilePuppets();
 }
 
-// Every listed NPC that is alive and standing is a puppet exactly when the partner runs it. A
-// knocked out one lies where it fell in each game.
+bool Session::Streaming(uint64_t p_Id) const {
+    const auto s_It = m_Puppets.find(p_Id);
+    return s_It != m_Puppets.end() && m_TickNow - s_It->second.lastData < m_Config.puppetDataTimeout;
+}
+
+// Every listed NPC that is alive and standing is a puppet exactly when the partner runs it and its
+// positions are arriving. A knocked out one lies where it fell in each game. One the partner runs
+// but doesn't send (not in their mission yet: pooled NPCs come in at different times) keeps its
+// own AI here; made a puppet with no positions it stood frozen or slid on its last orders.
 void Session::ReconcilePuppets() {
     for (const auto& s_Npc : Npcs()) {
-        const bool s_Want = s_Npc.Alive() && !KnockedOut(s_Npc) && OwnerOf(s_Npc.id) != MyOwner();
+        const bool s_Want = s_Npc.Alive() && !KnockedOut(s_Npc) && OwnerOf(s_Npc.id) != MyOwner() && !InContact(s_Npc.id) &&
+            Streaming(s_Npc.id) && !Unfollowing(s_Npc.id);
         const bool s_Is = m_Puppeted.count(s_Npc.id) != 0;
 
         if (s_Want == s_Is)
             continue;
 
-        if (s_Want)
+        if (s_Want) {
             m_Puppeted.insert(s_Npc.id);
+            ++m_LogCount.puppetsOn;
+        }
         else {
+            // Why, for the log: the partner's stream for it stopped (all else still wanted it).
+            const bool s_Stale = s_Npc.Alive() && !KnockedOut(s_Npc) && OwnerOf(s_Npc.id) != MyOwner() && !InContact(s_Npc.id);
+            m_LogCount.staleReleased += s_Stale ? 1 : 0;
+            ++m_LogCount.puppetsOff;
+            Log(s_Stale ? LogLevel::Debug : LogLevel::Trace, "npc", "%016llx runs its own AI again: %s", static_cast<unsigned long long>(s_Npc.id),
+                s_Stale ? "no positions from the partner for 5 s" : !s_Npc.Alive() ? "dead" : KnockedOut(s_Npc) ? "knocked out" :
+                InContact(s_Npc.id) ? "our 47 is on it" : "ours to run now");
             m_Puppeted.erase(s_Npc.id);
             m_World.ClearNpcPose(s_Npc.id);
             m_Puppets.erase(s_Npc.id);
         }
+
+        if (s_Want)
+            Log(LogLevel::Trace, "npc", "%016llx is a puppet of the partner's game now", static_cast<unsigned long long>(s_Npc.id));
 
         m_World.SetNpcPuppet(s_Npc.id, s_Want);
     }
@@ -1364,8 +1494,12 @@ void Session::ReleasePuppets() {
 
     m_Puppeted.clear();
     m_Puppets.clear();
+    m_UnfollowingUntil.clear();
     m_NpcOwner.clear();
+    m_OwnerChangedAt.clear();
     m_ClientChasedUntil.clear();
+    m_ContactId = 0;
+    m_ContactUntil = -1.0;
     m_NpcSent.clear();
     m_PoseSent.clear();
     m_HaveRemoteAvatar = false;
@@ -1392,6 +1526,14 @@ void Session::UpdateSharedNpcs(double p_Now) {
                 if (!s_Npc.Alive() || KnockedOut(s_Npc))
                     continue;
 
+                // Our own 47 is on it: ours.
+                if (InContact(s_Npc.id)) {
+                    if (OwnerOf(s_Npc.id) != NpcOwner_Host)
+                        s_Changes.push_back({ s_Npc.id, NpcOwner_Host });
+
+                    continue;
+                }
+
                 // After the client's 47 in the client's game (arresting them, say): the client's
                 // game runs it, wherever the players stand. Run here it was a puppet there, frozen
                 // halfway through the arrest, and the client's game crashed (seen with both
@@ -1404,6 +1546,11 @@ void Session::UpdateSharedNpcs(double p_Now) {
                 }
 
                 if (s_Npc.tension >= 4)
+                    continue;
+
+                // Changed hands a moment ago: it stays put a while (see ownerHoldTime).
+                if (const auto s_It = m_OwnerChangedAt.find(s_Npc.id);
+                    s_It != m_OwnerChangedAt.end() && p_Now - s_It->second < m_Config.ownerHoldTime)
                     continue;
 
                 const float s_ToHost = Distance(s_Local.pos, s_Npc.xf.pos);
@@ -1462,8 +1609,11 @@ void Session::UpdateSharedNpcs(double p_Now) {
         s_Snapshot.timeMs = static_cast<uint32_t>(static_cast<uint64_t>(p_Now * 1000.0));
 
         const auto s_SendChunk = [&] {
-            if (!s_Snapshot.npcs.empty())
+            if (!s_Snapshot.npcs.empty()) {
                 m_Conn->SendUnreliable(MsgType::NpcSnapshot, Encode(s_Snapshot));
+                ++m_LogCount.snapshotsOut;
+                m_LogCount.npcsOut += static_cast<uint32_t>(s_Snapshot.npcs.size());
+            }
 
             s_Snapshot.npcs.clear();
         };
@@ -1493,24 +1643,32 @@ void Session::UpdateSharedNpcs(double p_Now) {
         s_SendChunk();
     }
 
-    // Skeleton poses of the NPCs we run that are near the partner, so they animate there too: the
-    // nearest few at the full rate, the rest at half, and one standing still not again until it
-    // moves (or its last is getting old).
+    // Skeleton poses of the NPCs we run that are near the partner, so they animate there too.
+    // Without one a puppet walks on its own legs (the orders it had when it became a puppet):
+    // standing still while placed along a path it slid, walking while held in place it walked on
+    // the spot ("moonwalking"). So every NPC near the partner gets them: the nearest few every
+    // round, those further every other or third, and only the bones that changed (a whole pose
+    // every couple of seconds). One a little past the edge stays in a while, so an NPC there
+    // doesn't flick between its pose and its own legs.
     if (p_Now >= m_NextNpcPoseSend && m_HaveRemoteAvatar) {
         m_NextNpcPoseSend = p_Now + m_Config.npcPoseInterval * RateScale();
         ++m_PoseRound;
         std::vector<std::pair<float, uint64_t>> s_Near;
+        const std::unordered_set<uint64_t> s_Before(m_PoseIds.begin(), m_PoseIds.end());
 
         for (const auto& s_Npc : Npcs()) {
             if (!s_Npc.Alive() || KnockedOut(s_Npc) || OwnerOf(s_Npc.id) != MyOwner())
                 continue;
 
-            if (const float s_D = Distance(m_RemoteAvatarLast.pos, s_Npc.xf.pos); s_D < m_Config.npcPoseRange)
-                s_Near.emplace_back(s_D, s_Npc.id);
+            const bool s_Had = s_Before.count(s_Npc.id) != 0;
+            const float s_D = Distance(m_RemoteAvatarLast.pos, s_Npc.xf.pos);
+
+            if (s_D < m_Config.npcPoseRange + (s_Had ? 5.f : 0.f))
+                s_Near.emplace_back(s_Had ? std::max(0.f, s_D - 3.f) : s_D, s_Npc.id);
         }
 
         std::sort(s_Near.begin(), s_Near.end());
-        const size_t s_Max = m_Congested ? std::max<size_t>(1, m_Config.npcPoseMax / 2) : m_Config.npcPoseMax;
+        const size_t s_Max = m_Congested ? std::max<size_t>(4, m_Config.npcPoseMax / 3) : m_Config.npcPoseMax;
 
         if (s_Near.size() > s_Max)
             s_Near.resize(s_Max);
@@ -1521,28 +1679,82 @@ void Session::UpdateSharedNpcs(double p_Now) {
             m_PoseIds.push_back(s_Id);
 
         m_World.WatchNpcPoses(m_PoseIds);
-        m_NpcPoseSend.body.epoch = m_Epoch;
-        m_NpcPoseSend.body.timeMs = static_cast<uint32_t>(static_cast<uint64_t>(p_Now * 1000.0));
-        m_NpcPoseSend.flags = NpcFlag_Alive;
+        m_NpcPoseSend.epoch = m_Epoch;
+        m_NpcPoseSend.timeMs = static_cast<uint32_t>(static_cast<uint64_t>(p_Now * 1000.0));
+        int s_FullBudget = m_Congested ? 2 : 5;
 
-        for (size_t i = 0; i < m_PoseIds.size(); ++i) {
-            const uint64_t s_Id = m_PoseIds[i];
+        for (size_t i = 0; i < s_Near.size(); ++i) {
+            const auto [s_D, s_Id] = s_Near[i];
+            uint32_t s_Every = s_D < m_Config.npcPoseNear && i < m_Config.npcPoseFullRate ? 1 : s_D < m_Config.npcPoseMid ? 2 : 3;
 
-            if (i >= m_Config.npcPoseFullRate && (m_PoseRound + static_cast<uint32_t>(s_Id)) % 2 != 0)
+            if (m_Congested)
+                s_Every *= 2;
+
+            if ((m_PoseRound + static_cast<uint32_t>(s_Id)) % s_Every != 0)
                 continue;
 
-            if (!m_World.GetNpcPose(s_Id, m_NpcPoseSend.body.pose))
+            if (!m_World.GetNpcPose(s_Id, m_NpcPoseRead) || m_NpcPoseRead.rotations.empty() ||
+                m_NpcPoseRead.rotations.size() > kMaxPoseBones)
                 continue;
 
             auto& s_Last = m_PoseSent[s_Id];
+            const size_t s_Count = m_NpcPoseRead.rotations.size();
+            // A whole pose when the partner may not have one (new, silent a while), else now and
+            // then. Only a few whole ones a round: all at once they overflowed what goes out in a
+            // frame, and the same NPCs lost theirs every time. One that needs its first waits a
+            // round; one due a refresh sends its changes meanwhile.
+            const bool s_Needs = s_Last.pose.rotations.size() != s_Count || p_Now - s_Last.time > c_PoseHold * 0.5;
+            const bool s_Full = (s_Needs || p_Now - s_Last.fullAt >= m_Config.npcPoseFullEvery) && s_FullBudget > 0;
 
-            if (p_Now - s_Last.time < c_PoseHold * 0.3 && PosesAlike(s_Last.pose, m_NpcPoseSend.body.pose))
+            if (s_Needs && !s_Full)
                 continue;
 
-            s_Last.pose = m_NpcPoseSend.body.pose;
-            s_Last.time = p_Now;
+            s_FullBudget -= s_Full ? 1 : 0;
+
             m_NpcPoseSend.id = s_Id;
+            m_NpcPoseSend.full = s_Full;
+            m_NpcPoseSend.boneCount = static_cast<uint16_t>(s_Count);
+            m_NpcPoseSend.rootPos = m_NpcPoseRead.rootPos;
+            m_NpcPoseSend.pelvisPos = m_NpcPoseRead.pelvisPos;
+            m_NpcPoseSend.rotations.clear();
+            m_NpcPoseSend.changed.assign(s_Full ? 0 : (s_Count + 7) / 8, 0);
+
+            // What the partner will have of it, so what isn't sent is measured against that.
+            Pose s_Have = s_Last.pose;
+            s_Have.rotations.resize(s_Count);
+
+            for (size_t b = 0; b < s_Count; ++b) {
+                const Quat s_Q = UnpackQuat(PackQuat(m_NpcPoseRead.rotations[b]));
+
+                if (s_Full) {
+                    m_NpcPoseSend.rotations.push_back(s_Q);
+                    s_Have.rotations[b] = s_Q;
+                }
+                // A bone that turned more than about half a degree since they last got it.
+                else if (std::fabs(Dot(s_Q, s_Have.rotations[b])) < 0.99999f) {
+                    m_NpcPoseSend.changed[b / 8] |= static_cast<uint8_t>(1u << (b % 8));
+                    m_NpcPoseSend.rotations.push_back(s_Q);
+                    s_Have.rotations[b] = s_Q;
+                }
+            }
+
+            // Standing still: not again for a while (it holds its last pose there meanwhile).
+            if (!s_Full && m_NpcPoseSend.rotations.empty() && Distance(s_Last.pose.rootPos, m_NpcPoseRead.rootPos) < 0.01f &&
+                Distance(s_Last.pose.pelvisPos, m_NpcPoseRead.pelvisPos) < 0.01f && p_Now - s_Last.time < c_PoseHold * 0.3)
+                continue;
+
+            s_Last.pose = std::move(s_Have);
+            s_Last.pose.rootPos = m_NpcPoseRead.rootPos;
+            s_Last.pose.pelvisPos = m_NpcPoseRead.pelvisPos;
+            s_Last.time = p_Now;
+
+            if (s_Full)
+                s_Last.fullAt = p_Now;
+
             m_Conn->SendUnreliable(MsgType::NpcPose, Encode(m_NpcPoseSend));
+            ++m_LogCount.posesOut;
+            m_LogCount.posesFullOut += s_Full ? 1 : 0;
+            m_LogCount.poseBonesOut += static_cast<uint32_t>(m_NpcPoseSend.rotations.size());
         }
     }
 
@@ -1565,6 +1777,10 @@ void Session::UpdatePuppets(double p_Now) {
     const bool s_HaveLocal = m_World.GetLocalAvatar(s_Local);
     ++m_PuppetFrame;
 
+    // (Every half second or so, logging or not: it also finds puppets that won't stay put.)
+    if (m_PuppetFrame % 30 == 0)
+        MeasurePuppetDrift();
+
     for (auto& [s_Id, s_Puppet] : m_Puppets) {
         // The partner's takedown victim is placed by that stream (see UpdateAvatar).
         if (s_Id == m_VictimId || !m_Puppeted.count(s_Id))
@@ -1576,11 +1792,16 @@ void Session::UpdatePuppets(double p_Now) {
         if (!s_Puppet.xf.Sample(p_Now, s_Xf))
             continue;
 
-        // Far ones less often: nobody sees them closely.
-        const bool s_Near = s_HaveLocal && Distance(s_Local.pos, s_Xf.pos) < m_Config.puppetNearRange;
+        // Every frame within sight: a puppet's legs keep its last orders, so left alone for a frame
+        // it walked off its path and was put back the next (placed every other frame, far ones
+        // shook). Only those far beyond sight every other frame.
+        const bool s_Near = !s_HaveLocal || Distance(s_Local.pos, s_Xf.pos) < m_Config.puppetNearRange;
 
-        if (s_Near || (m_PuppetFrame + static_cast<uint32_t>(s_Id)) % 8 == 0)
+        if (s_Near || (m_PuppetFrame + static_cast<uint32_t>(s_Id)) % 2 == 0) {
             m_World.SetNpcTransform(s_Id, s_Xf);
+            s_Puppet.placed = s_Xf;
+            s_Puppet.hasPlaced = true;
+        }
 
         if (p_Now - s_Puppet.lastPose < c_PoseHold && s_Puppet.pose.Sample(p_Now, m_NpcPoseScratch)) {
             m_World.ShowNpcPose(s_Id, m_NpcPoseScratch);
@@ -1591,6 +1812,286 @@ void Session::UpdatePuppets(double p_Now) {
             s_Puppet.posed = false;
         }
     }
+}
+
+// Every 10 s while together (5 s after it starts): where our game has each NPC it lists, so the
+// partner's game can measure how far apart the two are (see FinishNpcCheck).
+void Session::SendNpcCheck(double p_Now) {
+    // The partner's last check, a part of it lost: done with what came (their positions are a
+    // second old by now; any later and walking NPCs would look out of place).
+    if (m_CheckIn.open && p_Now - m_CheckIn.startedAt > 1.0)
+        FinishNpcCheck(p_Now);
+
+    if (!IsSynced()) {
+        m_NextNpcCheck = p_Now + 5.0;
+        return;
+    }
+
+    if (p_Now < m_NextNpcCheck)
+        return;
+
+    m_NextNpcCheck = p_Now + 10.0;
+    const auto& s_Npcs = Npcs();
+    MsgNpcCheck s_Msg;
+    s_Msg.epoch = m_Epoch;
+    s_Msg.round = ++m_NpcCheckRound;
+    s_Msg.total = static_cast<uint16_t>(std::min<size_t>(s_Npcs.size(), 65535));
+    s_Msg.parts = static_cast<uint8_t>(std::min<size_t>((s_Npcs.size() + kMaxNpcChecksPerMsg - 1) / kMaxNpcChecksPerMsg, 255));
+
+    if (s_Msg.parts == 0)
+        s_Msg.parts = 1;
+
+    for (size_t i = 0; i < s_Msg.parts; ++i) {
+        s_Msg.part = static_cast<uint8_t>(i);
+        s_Msg.npcs.clear();
+
+        for (size_t j = i * kMaxNpcChecksPerMsg; j < std::min(s_Npcs.size(), (i + 1) * kMaxNpcChecksPerMsg); ++j) {
+            const auto& s_Npc = s_Npcs[j];
+            NpcCheckEntry s_Entry;
+            s_Entry.id = s_Npc.id;
+            s_Entry.pos = s_Npc.xf.pos;
+            s_Entry.flags = static_cast<uint8_t>((s_Npc.Alive() ? NpcCheck_Alive : 0) | (KnockedOut(s_Npc) ? NpcCheck_Pacified : 0) |
+                (OwnerOf(s_Npc.id) == MyOwner() ? NpcCheck_SenderRuns : 0) | (m_Puppeted.count(s_Npc.id) ? NpcCheck_Puppet : 0));
+            s_Msg.npcs.push_back(s_Entry);
+        }
+
+        m_Conn->SendUnreliable(MsgType::NpcCheck, Encode(s_Msg));
+    }
+}
+
+void Session::OnNpcCheck(const MsgNpcCheck& p_Msg, double p_Now) {
+    // A new round: the last one is done with whatever of it arrived.
+    if (m_CheckIn.open && p_Msg.round != m_CheckIn.round)
+        FinishNpcCheck(p_Now);
+
+    if (!m_CheckIn.open) {
+        if (p_Msg.round == m_CheckDone)
+            return; // a part of a check already done (it came late)
+
+        m_CheckIn = {};
+        m_CheckIn.open = true;
+        m_CheckIn.round = p_Msg.round;
+        m_CheckIn.parts = p_Msg.parts;
+        m_CheckIn.startedAt = p_Now;
+    }
+
+    ++m_CheckIn.got;
+    m_CheckIn.npcs.insert(m_CheckIn.npcs.end(), p_Msg.npcs.begin(), p_Msg.npcs.end());
+
+    if (m_CheckIn.got >= m_CheckIn.parts)
+        FinishNpcCheck(p_Now);
+}
+
+// The partner's positions against ours. Played-back puppets lag their owner by the playback delay
+// and the trip, so a walking NPC is a few tenths of a metre apart even when all is well: 1 m is
+// "the same place". Over 5 m is out of sync, and the worst are logged with what each game does
+// with them, which says why.
+void Session::FinishNpcCheck(double p_Now) {
+    if (!m_CheckIn.open)
+        return;
+
+    m_CheckIn.open = false;
+    m_CheckDone = m_CheckIn.round;
+    NpcSyncReport r;
+    r.at = p_Now;
+    r.complete = m_CheckIn.got >= m_CheckIn.parts;
+
+    std::unordered_map<uint64_t, const NpcState*> s_Ours;
+
+    for (const auto& s_Npc : Npcs())
+        s_Ours[s_Npc.id] = &s_Npc;
+
+    struct Off {
+        float distance;
+        uint64_t id;
+        std::string why;
+    };
+    std::vector<Off> s_Worst;
+    std::unordered_set<uint64_t> s_Seen;
+
+    for (const auto& s_Theirs : m_CheckIn.npcs) {
+        s_Seen.insert(s_Theirs.id);
+        const auto s_It = s_Ours.find(s_Theirs.id);
+
+        if (s_It == s_Ours.end()) {
+            ++r.onlyTheirs;
+            continue;
+        }
+
+        const NpcState& s_Mine = *s_It->second;
+        const bool s_TheirsUp = (s_Theirs.flags & NpcCheck_Alive) && !(s_Theirs.flags & NpcCheck_Pacified);
+        const bool s_MineUp = s_Mine.Alive() && !KnockedOut(s_Mine);
+
+        if (s_TheirsUp != s_MineUp) {
+            ++r.lifeDiffers;
+            continue;
+        }
+
+        ++r.compared;
+        const float s_D = Distance(s_Mine.xf.pos, s_Theirs.pos);
+
+        if (s_D < 1.f) {
+            ++r.same;
+            continue;
+        }
+
+        if (s_D <= 5.f)
+            ++r.fewMetres;
+        else
+            ++r.outOfPlace;
+
+        // Why: who runs it, and what the other game does with it.
+        std::string s_Why;
+
+        if (!s_TheirsUp)
+            s_Why = "a body";
+        else if (s_Theirs.flags & NpcCheck_SenderRuns)
+            s_Why = std::string("partner runs it; here ") +
+                (m_Puppeted.count(s_Theirs.id) ? "a puppet" : Streaming(s_Theirs.id) ? "positions arriving, not a puppet yet" :
+                                                    InContact(s_Theirs.id) ? "our 47 is on it" : "no positions, our AI runs it");
+        else
+            s_Why = std::string("we run it; there ") + ((s_Theirs.flags & NpcCheck_Puppet) ? "a puppet" : "not a puppet, their AI runs it");
+
+        s_Worst.push_back({ s_D, s_Theirs.id, s_Why });
+    }
+
+    for (const auto& [s_Id, s_Npc] : s_Ours)
+        r.onlyOurs += s_Seen.count(s_Id) ? 0 : 1;
+
+    std::sort(s_Worst.begin(), s_Worst.end(), [](const Off& a, const Off& b) { return a.distance > b.distance; });
+
+    for (size_t i = 0; i < std::min<size_t>(s_Worst.size(), 6); ++i) {
+        char s_Line[160];
+        std::snprintf(s_Line, sizeof(s_Line), "%s%016llx %.1f m (%s)", i ? "; " : "", static_cast<unsigned long long>(s_Worst[i].id),
+            s_Worst[i].distance, s_Worst[i].why.c_str());
+        r.worst += s_Line;
+    }
+
+    m_LastCheck = r;
+    const LogLevel s_Level = r.outOfPlace > 0 ? LogLevel::Info : LogLevel::Debug;
+    Log(s_Level, "check",
+        "sync check: %zu NPCs in both games: %zu in the same place, %zu 1-5 m apart, %zu over 5 m; %zu only in the partner's game, "
+        "%zu only in ours, %zu alive in one and down in the other%s%s%s",
+        r.compared, r.same, r.fewMetres, r.outOfPlace, r.onlyTheirs, r.onlyOurs, r.lifeDiffers, r.complete ? "" : " (part of the check was lost)",
+        r.worst.empty() ? "" : ". Worst: ", r.worst.c_str());
+
+    // The whole list, for chasing one NPC (trace only: a few hundred lines).
+    if (m_World.LogEnabled(LogLevel::Trace))
+        for (const auto& s_Off : s_Worst)
+            Log(LogLevel::Trace, "check", "%016llx %.2f m apart (%s)", static_cast<unsigned long long>(s_Off.id), s_Off.distance, s_Off.why.c_str());
+}
+
+// How far each puppet got from where we last put it, in this tick's NPC list (taken before this
+// frame's placing). The game keeps a puppet's legs going on its last orders: this says how much.
+void Session::MeasurePuppetDrift() {
+    for (const auto& s_Npc : Npcs()) {
+        const auto s_It = m_Puppets.find(s_Npc.id);
+
+        if (s_It == m_Puppets.end() || !s_It->second.hasPlaced || !m_Puppeted.count(s_Npc.id))
+            continue;
+
+        const float s_Drift = Distance(s_Npc.xf.pos, s_It->second.placed.pos);
+        m_LogCount.driftSum += s_Drift;
+        ++m_LogCount.driftCount;
+        m_LogCount.driftMax = std::max(m_LogCount.driftMax, s_Drift);
+
+        // Far from where it was put, check after check (seen in game: one went 30 m off while
+        // placed every frame, then came back): the game moves it itself. Its own AI runs a while.
+        s_It->second.offPlace = s_Drift > 3.f ? s_It->second.offPlace + 1 : 0;
+
+        if (s_It->second.offPlace >= 3) {
+            m_UnfollowingUntil[s_Npc.id] = m_TickNow + 20.0;
+            s_It->second.offPlace = 0;
+            ++m_LogCount.unfollowing;
+            Log(LogLevel::Info, "npc", "%016llx doesn't stay where it is put (%.1f m off): its own AI runs it here for 20 s",
+                static_cast<unsigned long long>(s_Npc.id), s_Drift);
+        }
+    }
+}
+
+bool Session::Unfollowing(uint64_t p_Id) const {
+    const auto s_It = m_UnfollowingUntil.find(p_Id);
+    return s_It != m_UnfollowingUntil.end() && m_TickNow < s_It->second;
+}
+
+std::string Session::LinkSummary() const {
+    if (!m_Conn)
+        return {};
+
+    const ConnectionStats s_Stats = m_Conn->Stats();
+    char s_Text[256];
+    std::snprintf(s_Text, sizeof(s_Text), " (rtt %.0f ms, loss %.1f%%, jitter %.0f ms, %llu packets out, %llu in, %llu resent, %zu waiting for an ack%s)",
+        s_Stats.rttMs, s_Stats.lossPercent, s_Stats.jitterMs, static_cast<unsigned long long>(s_Stats.packetsSent),
+        static_cast<unsigned long long>(s_Stats.packetsReceived), static_cast<unsigned long long>(s_Stats.resends), s_Stats.reliablePending,
+        m_ConnectedAt >= 0.0 ? (", connected " + std::to_string(static_cast<int>(m_TickNow - m_ConnectedAt)) + " s").c_str() : "");
+    return s_Text;
+}
+
+// Every 10 s while connected: the link, and how NPC sharing is doing. The first thing to read in
+// a bug report about lag, NPCs out of place or sliding.
+void Session::LogStats(double p_Now) {
+    if (p_Now < m_NextStatsLog || !m_Conn)
+        return;
+
+    const double s_Span = m_LastStatsAt >= 0.0 ? std::max(0.5, p_Now - m_LastStatsAt) : 10.0;
+    m_NextStatsLog = p_Now + 10.0;
+    m_LastStatsAt = p_Now;
+    const ConnectionStats s_Stats = m_Conn->Stats();
+    const double s_InKbps = s_Stats.bytesReceived >= m_StatsBytesIn ? (s_Stats.bytesReceived - m_StatsBytesIn) * 8.0 / 1000.0 / s_Span : 0.0;
+    const double s_OutKbps = s_Stats.bytesSent >= m_StatsBytesOut ? (s_Stats.bytesSent - m_StatsBytesOut) * 8.0 / 1000.0 / s_Span : 0.0;
+    m_StatsBytesIn = s_Stats.bytesReceived;
+    m_StatsBytesOut = s_Stats.bytesSent;
+    const LogCounters c = m_LogCount;
+    m_LogCount = {};
+
+    if (!m_World.LogEnabled(LogLevel::Info))
+        return;
+
+    size_t s_Listed = 0, s_Ours = 0, s_Waiting = 0;
+
+    if (IsSynced()) {
+        for (const auto& s_Npc : Npcs()) {
+            ++s_Listed;
+
+            if (!s_Npc.Alive() || KnockedOut(s_Npc))
+                continue;
+
+            if (OwnerOf(s_Npc.id) == MyOwner())
+                ++s_Ours;
+            else if (!Streaming(s_Npc.id))
+                ++s_Waiting;
+        }
+    }
+
+    double s_DelaySum = 0.0;
+    size_t s_DelayCount = 0;
+    size_t s_Posed = 0;
+
+    for (const auto& [s_Id, s_Puppet] : m_Puppets)
+        if (m_Puppeted.count(s_Id)) {
+            s_DelaySum += s_Puppet.xf.Delay();
+            ++s_DelayCount;
+            s_Posed += s_Puppet.posed ? 1 : 0;
+        }
+
+    Log(LogLevel::Info, "stats",
+        "%s | link rtt %.0f ms (best %.0f), loss %.1f%%, jitter %.0f ms, out %.0f kbps, in %.0f kbps, %zu unacked, %llu held a frame, %llu dropped, %llu came late%s"
+        " | npcs %zu listed, %zu ours, %zu puppets, %zu theirs without data"
+        " | sent %.1f snapshots/s (%.0f npcs/s), %.1f poses/s (%.1f whole, %.0f bones each), %zu posed"
+        " | got %.1f snapshots/s (%.0f npcs/s), %.1f poses/s, %u waiting for a whole one, %zu puppets posed"
+        " | %u changed hands, puppets +%u -%u (%u for no data, %u didn't stay put) | puppet drift avg %.2f m, max %.2f m"
+        " | playback delay npcs %.0f ms, partner %.0f ms",
+        IsSynced() ? "together" : "connected, not together", s_Stats.rttMs, m_MinRtt < 1e8 ? m_MinRtt : 0.0, s_Stats.lossPercent,
+        s_Stats.jitterMs, s_OutKbps, s_InKbps, s_Stats.reliablePending, static_cast<unsigned long long>(s_Stats.unreliableDeferred),
+        static_cast<unsigned long long>(s_Stats.unreliableDropped), static_cast<unsigned long long>(s_Stats.unreliableLate),
+        m_Congested ? ", struggling" : "",
+        s_Listed, s_Ours, m_Puppeted.size(), s_Waiting,
+        c.snapshotsOut / s_Span, c.npcsOut / s_Span, c.posesOut / s_Span, c.posesFullOut / s_Span,
+        c.posesOut ? static_cast<double>(c.poseBonesOut) / c.posesOut : 0.0, m_PoseIds.size(),
+        c.snapshotsIn / s_Span, c.npcsIn / s_Span, c.posesIn / s_Span, c.posesWaiting, s_Posed,
+        c.ownerChanges, c.puppetsOn, c.puppetsOff, c.staleReleased, c.unfollowing,
+        c.driftCount ? c.driftSum / c.driftCount : 0.0, c.driftMax,
+        s_DelayCount ? s_DelaySum / s_DelayCount * 1000.0 : 0.0, m_RemoteAvatar.Delay() * 1000.0);
 }
 
 } // namespace coop

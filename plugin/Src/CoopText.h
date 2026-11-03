@@ -3,9 +3,34 @@
 #include <algorithm>
 #include <cstdio>
 #include <string>
+#include <string_view>
 
 // Words and numbers the game-thread code and the UI share.
-inline constexpr const char* c_ModVersion = "0.13.2";
+inline constexpr const char* c_ModVersion = "0.13.94";
+
+// The game version this build is for (set by plugin/CMakeLists.txt from the SDK it is built
+// against): "3.290" normally, "3.280" for the build players who can't update get (the installer
+// picks the one for the game it finds).
+#ifndef COOP_GAME_TARGET
+#define COOP_GAME_TARGET "3.290"
+#endif
+#ifndef COOP_SDK_VERSION
+#define COOP_SDK_VERSION 40201
+#endif
+inline constexpr const char* c_GameTarget = COOP_GAME_TARGET;
+inline constexpr const char* c_SdkName = COOP_SDK_VERSION == 40201 ? "4.2.1" : COOP_SDK_VERSION == 40101 ? "4.1.1" : "4.0.0-rc.1";
+// In the DLL as it is, so tools/package.ps1 can tell the builds apart (and the log names it).
+inline constexpr const char* c_BuildMark = "HitmanCoop build for game " COOP_GAME_TARGET;
+
+// The self-updater's file, for the game version running rather than this build's: a player who
+// updates their game from 3.280 to 3.290 (or has the wrong build) gets the right one by itself.
+inline std::string UpdateFileFor(const std::string& p_GameVersion) {
+    if (p_GameVersion.rfind("3.280.", 0) == 0)
+        return "update-3.280.txt";
+
+    return "update.txt";
+}
+
 inline constexpr const char* c_Author = "Jordan Rodrigues";
 
 // The quick messages as they come (each can be rewritten under Settings).

@@ -2,9 +2,10 @@
 
 #include <string>
 
-// Test builds only (installed when the test channel is on): writes the first access violations
-// in the game to a file, each with its module-relative address and a stack walk, so a crash can
-// be located without a debugger attached. Players never get this.
+// Writes the first faults in the game (access violations, illegal instructions, stack overflows,
+// heap corruption, and anything left unhandled) to a file, each with its module-relative address
+// and a stack walk, so a crash can be located without a debugger attached. p_Header (the mod and
+// game versions) heads each report.
 namespace CrashTrace {
-void Install(const std::string& p_Path);
+void Install(const std::string& p_Path, const std::string& p_Header = {});
 }

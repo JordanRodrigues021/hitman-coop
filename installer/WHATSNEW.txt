@@ -1,3 +1,48 @@
+HITMAN Co-op 0.13.94 (beta)
+
+- Dragging bodies: the body your partner drags now moves with them on your screen, in their arms, and lies where they leave it. Before, they dragged nothing and the body vanished once dropped.
+- Bodies lie in the same place for both of you: a body that fell somewhere else in your game (each PC's physics drops it its own way) is moved to where it lies for the player who took it down.
+- Dropped and thrown items come to rest in the same place on both screens.
+- No more blinking or moonwalking NPCs: every NPC near you now walks with the animation it has in your partner's game (before, only the 10 nearest did, and an NPC walking towards you kept losing it and walked on its own leftover steps). The connection also no longer throws away animations that arrive a moment late.
+- A proper pause screen: when your partner's menu or inventory pauses your game, it fades into a red-framed HITMAN-style screen saying who paused it and where they are, with the time. It also shows while the mission waits for your partner to load in. Settings: "Preview the pause screen".
+- The log's health line now also counts NPC animations sent and received, and late messages.
+
+Also in this beta (from 0.13.93):
+
+- One download for game 3.290 and 3.280: the setup (and Install.bat, and the Linux installer) installs the build for the game it finds. If you later update the game, HITMAN Co-op switches itself to the right build.
+- Fewer NPCs sliding in busy missions: in crowded places part of what your partner's game sent each moment (NPC animations above all) never left, the same NPCs every time. It now goes a moment later instead.
+- A sync check every 10 seconds: CO-OP shows how many NPCs are in the same place in both games, and the log says which ones aren't and why.
+- A much better log (Retail\mods\HitmanCoop.log): date and time on every line, a health line every 10 seconds while you play together (connection, NPCs shared, how far apart the games are, frame rate), and everything about your PC and install at the top. Settings > Log: "Verbose" for bug hunting. IP addresses are hidden unless you turn them on.
+- About > Save bug report: both sessions' logs, any crash report and your settings in one zip to send.
+- A Linux / Steam Deck download (HitmanCoop-...-linux.tar.gz, run bash installer.sh), thanks to opigod.
+
+Also in this beta (from 0.13.92):
+
+- NPCs are where they should be in both games much more often. An NPC your partner's game hasn't brought into the mission yet (or has taken out) keeps moving by itself on your screen, instead of standing frozen or sliding somewhere nobody put it.
+- NPCs no longer glide off before they really start walking.
+- NPCs far from you no longer wander off their path and jump back.
+- NPCs between you and your partner no longer flip back and forth between your games, which made them slide and walk through walls.
+
+Also in this beta (from 0.13.91):
+
+- A separate build for game 3.280, for players who can't update to 3.290.1. The normal build crashed on 3.280 the moment your partner entered the mission. Both players need the same build.
+- A build made for another game version no longer crashes: co-op stays off and says which build you need.
+- The 3.280 build only ever updates itself to newer 3.280 builds.
+
+Also in this beta (from 0.13.90):
+
+- Items on the table at the start of Freeform Training (flash grenade, lockpick, coins) now disappear for your partner when you pick them up, and show in your hand on their screen.
+- Weapons you drop that came with your loadout (Bartoli 12G, Fusil G2, ICA19...) now appear on the floor for your partner, and they can pick them up.
+- The right gun shows in your partner's hand (a gun slung on the back was taken for the one in hand), and a gun on their back shows on their back.
+- Bodies stripped of their clothes are stripped for your partner too.
+- A body your partner put in a container no longer offers its outfit where it was last seen.
+- Fist fights with an NPC work on both PCs: the NPC no longer freezes and ignores the hits.
+- Fixed a crash when your partner restarted the mission, and on leaving a mission, after bodies had been hidden.
+- Knocking out one crowd NPC ("John Doe") no longer knocks out every crowd NPC in your partner's game.
+- Crash reports now catch more kinds of crashes, and say which version crashed and when.
+
+Both players need this same version (it can't play with 0.13.2).
+
 HITMAN Co-op 0.13.2
 
 - Bodies no longer turn invisible by themselves. A body that slid or settled on its own was taken for one your partner had moved, and hidden in their game. Now only a body a player actually drags or hides counts.

@@ -19,6 +19,10 @@ out a target at the same moment.
 
 It's free, it's open source, and I keep updating it.
 
+**Testers and developers:** the beta is on the [`beta` branch](https://github.com/JordanRodrigues021/hitman-coop/tree/beta)
+(code) and its builds are the [pre-releases](https://github.com/JordanRodrigues021/hitman-coop/releases).
+See [BETA.md](https://github.com/JordanRodrigues021/hitman-coop/blob/beta/BETA.md).
+
 ## Discord
 
 There's a [HITMAN Co-op Discord](https://discord.gg/rQeHdpbKUp) now. You can find someone to play

@@ -345,12 +345,13 @@ bool Updater::TakeWhatsNew(const std::string& p_GameDir, const std::string& p_Ve
     return true;
 }
 
-void Updater::Start(const std::string& p_GameDir, const std::string& p_Version, const std::string& p_ManifestUrl, const std::string& p_FallbackUrl) {
+void Updater::Start(const std::string& p_GameDir, const std::string& p_Version, const std::string& p_ManifestUrl, const std::string& p_FallbackUrl,
+    bool p_Reinstall) {
     if (m_Thread.joinable())
         return;
 
     Set(State::Checking);
-    m_Thread = std::thread(&Updater::Run, this, p_GameDir, p_Version, p_ManifestUrl, p_FallbackUrl);
+    m_Thread = std::thread(&Updater::Run, this, p_GameDir, p_Version, p_ManifestUrl, p_FallbackUrl, p_Reinstall);
 }
 
 Updater::Status Updater::Get() const {
@@ -363,7 +364,7 @@ void Updater::Set(State p_State, const std::string& p_Version, const std::string
     m_Status = { p_State, p_Version, p_Error };
 }
 
-void Updater::Run(std::string p_GameDir, std::string p_Version, std::string p_ManifestUrl, std::string p_FallbackUrl) {
+void Updater::Run(std::string p_GameDir, std::string p_Version, std::string p_ManifestUrl, std::string p_FallbackUrl, bool p_Reinstall) {
     std::string s_Text, s_Error;
     Manifest s_Manifest;
 
@@ -374,7 +375,8 @@ void Updater::Run(std::string p_GameDir, std::string p_Version, std::string p_Ma
     if (!Parse(s_Text, s_Manifest))
         return Set(State::Failed, {}, "update.txt isn't readable");
 
-    if (CompareVersions(s_Manifest.version, p_Version) <= 0)
+    // Never older; the same only to put in the build for this game version.
+    if (const int s_Cmp = CompareVersions(s_Manifest.version, p_Version); s_Cmp < 0 || (s_Cmp == 0 && !p_Reinstall))
         return Set(State::UpToDate, s_Manifest.version);
 
     // Every file that differs, downloaded and checked first: nothing is swapped unless all are.
@@ -419,6 +421,9 @@ void Updater::Run(std::string p_GameDir, std::string p_Version, std::string p_Ma
 
         s_Staged.push_back({ s_Target, s_Fresh });
     }
+
+    if (s_Staged.empty())
+        return Set(State::UpToDate, s_Manifest.version);
 
     // Swapped in: the running file renamed out of the way (Windows allows that for a loaded DLL),
     // the new one renamed in. Undone if any of them can't be.

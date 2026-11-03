@@ -37,6 +37,14 @@ public:
             s_SenderTime = m_LastSenderTime + s_Delta / 1000.0;
         }
 
+        // A stream sent only on change (NPCs): a gap this long means the value stood still. It is
+        // held until just before the new one, so playback doesn't creep from the old value across
+        // the whole gap (puppets started gliding off up to 2 s before the NPC really walked).
+        if (m_HoldGap > 0.0 && !m_Snapshots.empty() && s_SenderTime - m_Snapshots.back().senderTime > m_HoldGap) {
+            const double s_Step = std::clamp(m_Interval, 1.0 / 60.0, m_HoldGap * 0.5);
+            m_Snapshots.push_back({ s_SenderTime - s_Step, m_Snapshots.back().value });
+        }
+
         m_HasLast = true;
         m_LastMs = p_SenderTimeMs;
         m_LastSenderTime = s_SenderTime;
@@ -78,6 +86,8 @@ public:
     // The delay to play back at from now on, reached gradually (at most 5% faster or slower than
     // real time), so a change never shows as a jump.
     void Retarget(double p_Delay) { m_TargetDelay = p_Delay; }
+    // For streams sent only when the value changes: gaps longer than this are held still (0: off).
+    void SetHoldGap(double p_Gap) { m_HoldGap = p_Gap; }
     double Delay() const { return m_Delay; }
 
     // False until the first snapshot arrives. Call once per frame with increasing p_Now.
@@ -150,6 +160,7 @@ private:
 
     double m_Delay;
     double m_TargetDelay = 0.0; // 0: fixed at m_Delay
+    double m_HoldGap = 0.0;
     size_t m_Capacity;
     bool m_HasSampled = false;
     bool m_HasReceive = false;

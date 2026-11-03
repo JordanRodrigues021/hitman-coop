@@ -20,8 +20,8 @@ void** g_Table = nullptr;
 UpdateFn g_Original = nullptr;
 
 constexpr size_t c_Channels = 2;
-constexpr size_t c_Extras = 32; // the partner's victim and their NPCs near us (puppets)
-constexpr size_t c_Watched = 16; // our NPCs near the partner, whose poses we send
+constexpr size_t c_Extras = 64;  // the partner's victim and their NPCs near us (puppets)
+constexpr size_t c_Watched = 40; // our NPCs near the partner, whose poses we send (Session's npcPoseMax and some)
 
 std::atomic<void*> g_Sources[c_Channels] {};
 std::atomic<void*> g_Target { nullptr };
@@ -272,12 +272,34 @@ void PoseHook::ClearPoseFor(void* p_Animator) {
 void PoseHook::SetWatched(const std::vector<void*>& p_Animators) {
     std::lock_guard s_Lock(g_Mutex);
 
+    // Each keeps its slot, and the pose recorded there, while it stays watched. The list comes
+    // sorted by distance, and slots were given out in that order: every time two NPCs swapped
+    // places, all after them moved slot, their poses were dropped as stale and not sent that round
+    // (an NPC walking towards the partner kept losing its pose, and walked on its own legs there).
     for (size_t i = 0; i < c_Watched; ++i) {
-        void* s_Want = i < p_Animators.size() ? p_Animators[i] : nullptr;
-
-        if (g_Watched[i] != s_Want) {
-            g_Watched[i] = s_Want;
+        if (g_Watched[i] && std::find(p_Animators.begin(), p_Animators.end(), g_Watched[i].load()) == p_Animators.end()) {
+            g_Watched[i] = nullptr;
             g_WatchedFresh[i] = false;
+        }
+    }
+
+    for (void* s_Want : p_Animators) {
+        if (!s_Want)
+            continue;
+
+        int s_Free = -1;
+        bool s_Have = false;
+
+        for (size_t i = 0; i < c_Watched && !s_Have; ++i) {
+            if (g_Watched[i] == s_Want)
+                s_Have = true;
+            else if (!g_Watched[i] && s_Free < 0)
+                s_Free = static_cast<int>(i);
+        }
+
+        if (!s_Have && s_Free >= 0) {
+            g_WatchedFresh[s_Free] = false;
+            g_Watched[s_Free] = s_Want;
         }
     }
 }

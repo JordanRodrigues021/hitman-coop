@@ -1,5 +1,5 @@
 =====================================================
-   HITMAN CO-OP 0.13.2
+   HITMAN CO-OP 0.13.94
    * created by Jordan Rodrigues *
 =====================================================
 
@@ -8,13 +8,24 @@ No IOI, Peacock, Steam or Epic servers are used: it works with the game online o
 
 INSTALL (both players, the same version)
   1. Close the game.
-  2. Run HitmanCoop-Setup-0.13.2.exe and click INSTALL.
+  2. Run HitmanCoop-Setup-0.13.94.exe and click INSTALL.
      (Windows may say "Windows protected your PC" because the file isn't signed:
      click "More info", then "Run anyway".)
-     Prefer a zip? Extract HitmanCoop-0.13.2.zip and double-click Install.bat.
+     Prefer a zip? Extract HitmanCoop-0.13.94.zip and double-click Install.bat.
   The setup finds Steam, Epic and Heroic/Legendary installs by itself, or you pick
   the game folder (the one with Retail inside; picking Retail itself works too).
   It writes what it did to Retail\HitmanCoop-install.log.
+  It installs the build for your game version: the current game (3.290.x), or
+  3.280.x for players who can't update. Both players need the same game version.
+
+  On Linux / Steam Deck (Proton), extract HitmanCoop-0.13.94-linux.tar.gz (or the
+  zip), open a terminal in that folder and run:
+      bash installer.sh
+  To remove it again:
+      bash installer.sh --uninstall
+  The Linux installer finds Steam, Heroic and Legendary installs by itself, or
+  use --game "/path/to/HITMAN 3". Set the Proton launch option below if the
+  CO-OP window doesn't appear.
 
 PLAY
   1. Both start the game and press ~ (the key under Esc; ^ on German keyboards).
@@ -142,7 +153,8 @@ COMPATIBILITY
     didn't start themselves.
   - Another mod loader or other SDK mods already installed: the setup installs the
     loader version HITMAN Co-op needs, backs up yours, and puts it back on uninstall.
-  - Steam Deck / Linux (Proton): set the game's launch options to
+  - Steam Deck / Linux (Proton): run installer.sh from the zip (see INSTALL), and
+    set the game's launch options to
       WINEDLLOVERRIDES="dinput8=n,b" %command%
     so the mod loader is used.
 
@@ -150,9 +162,10 @@ TEST YOUR CONNECTION (no game needed)
   In the setup window, click "Test connection" (or run Test-Connection.exe).
 
 UNINSTALL
-  Run the setup again and click Uninstall (or double-click Uninstall.bat). The game
-  folder is put back exactly as it was: the mod removed, a mod loader we added
-  removed (kept if other mods need it), one we replaced restored.
+  Run the setup again and click Uninstall (or double-click Uninstall.bat). On
+  Linux, run "bash installer.sh --uninstall". The game folder is put back exactly
+  as it was: the mod removed, a mod loader we added removed (kept if other mods
+  need it), one we replaced restored.
 
 HITMAN Co-op is (c) 2026 Jordan Rodrigues, free software under the GPL v3.
 It uses ZHMModSDK by OrfeasZ. Licenses are in the licenses folder.

@@ -258,6 +258,67 @@ TEST(Protocol_PoseFitsAndRoundTrips) {
     CHECK(!Decode(Encode(m), o));
 }
 
+
+TEST(Protocol_NpcPoseCarriesOnlyChangedBones) {
+    MsgNpcPose m, o;
+    m.epoch = 3;
+    m.timeMs = 1234;
+    m.id = 0xfeedfacecafebeefull;
+    m.full = true;
+    m.boneCount = 231;
+    m.rootPos = { 0.001f, -0.25f, 0.f };
+    m.pelvisPos = { 0.f, 0.02f, 1.05f };
+    m.rotations.assign(231, Quat {});
+    m.rotations[7] = Normalize(Quat { 0.2f, 0.1f, 0.f, 0.97f });
+
+    // A whole one: every bone, and it fits a packet.
+    auto s_Bytes = Encode(m);
+    CHECK_MSG(s_Bytes.size() <= kMaxMessageSize, "%zu bytes", s_Bytes.size());
+    REQUIRE(Decode(s_Bytes, o));
+    CHECK(o.full && o.boneCount == 231 && o.rotations.size() == 231 && o.id == m.id);
+    CHECK(std::fabs(o.pelvisPos.z - 1.05f) < 0.001f && std::fabs(o.rootPos.y + 0.25f) < 0.001f);
+    Pose s_Have;
+    REQUIRE(o.ApplyTo(s_Have));
+    CHECK(s_Have.rotations.size() == 231 && std::fabs(Dot(s_Have.rotations[7], m.rotations[7])) > 0.9999f);
+
+    // Three bones changed: a small message, laid over the whole one.
+    MsgNpcPose c;
+    c.epoch = 3;
+    c.timeMs = 1300;
+    c.id = m.id;
+    c.full = false;
+    c.boneCount = 231;
+    c.pelvisPos = { 0.f, 0.03f, 1.04f };
+    c.changed.assign((231 + 7) / 8, 0);
+    const Quat s_Turned = Normalize(Quat { 0.f, 0.38f, 0.f, 0.92f });
+
+    for (const int b : { 1, 100, 230 }) {
+        c.changed[b / 8] |= static_cast<uint8_t>(1u << (b % 8));
+        c.rotations.push_back(s_Turned);
+    }
+
+    s_Bytes = Encode(c);
+    CHECK_MSG(s_Bytes.size() < 80, "%zu bytes", s_Bytes.size());
+    REQUIRE(Decode(s_Bytes, o));
+    CHECK(!o.full && o.rotations.size() == 3);
+    REQUIRE(o.ApplyTo(s_Have));
+    CHECK(std::fabs(Dot(s_Have.rotations[100], s_Turned)) > 0.9999f && std::fabs(Dot(s_Have.rotations[230], s_Turned)) > 0.9999f);
+    CHECK(std::fabs(Dot(s_Have.rotations[7], m.rotations[7])) > 0.9999f); // untouched
+    CHECK(std::fabs(s_Have.pelvisPos.z - 1.04f) < 0.001f);
+
+    // Changes for a pose of another size (or none yet) can't be laid down.
+    Pose s_None;
+    CHECK(!o.ApplyTo(s_None));
+
+    // A bit past the last bone is a broken message.
+    c.boneCount = 230;
+    c.changed.assign((230 + 7) / 8, 0);
+    c.changed.back() = 0x80;
+    c.rotations.assign(1, Quat {});
+    auto s_Bad = Encode(c);
+    CHECK(!Decode(s_Bad, o));
+}
+
 TEST(Protocol_VictimPoseFitsAndRoundTrips) {
     MsgVictimPose m, o;
     m.body.epoch = 4;
@@ -469,6 +530,7 @@ static void RunReliableChaos(uint32_t p_Seed, uint16_t p_Seq, uint16_t p_RelId, 
         bool s_InOrder = true;
         int64_t s_LastUnreliable = -1;
         bool s_UnreliableMonotonic = true;
+        size_t s_Late = 0;
 
         for (const auto& m : p_Inbox) {
             ByteReader r(m.payload);
@@ -479,6 +541,12 @@ static void RunReliableChaos(uint32_t p_Seed, uint16_t p_Seq, uint16_t p_RelId, 
                 if (v != s_Expected) s_InOrder = false;
                 ++s_Expected;
             }
+            // Unreliable ones arrive newest first, each newer than the last, except those marked
+            // late (in a packet a newer one overtook), which are older.
+            else if (m.late) {
+                if (static_cast<int64_t>(v) >= s_LastUnreliable) s_UnreliableMonotonic = false;
+                ++s_Late;
+            }
             else {
                 if (static_cast<int64_t>(v) <= s_LastUnreliable) s_UnreliableMonotonic = false;
                 s_LastUnreliable = v;
@@ -487,7 +555,7 @@ static void RunReliableChaos(uint32_t p_Seed, uint16_t p_Seq, uint16_t p_RelId, 
 
         CHECK_MSG(s_InOrder && s_Expected == static_cast<uint32_t>(p_Count), "%s got %u of %d reliable, in order=%d",
             p_Side, s_Expected, p_Count, s_InOrder);
-        CHECK_MSG(s_UnreliableMonotonic, "%s saw stale unreliable messages", p_Side);
+        CHECK_MSG(s_UnreliableMonotonic, "%s saw stale unreliable messages not marked late (%zu late)", p_Side, s_Late);
     };
 
     s_Check(p.inboxB, "B");
@@ -531,6 +599,55 @@ TEST(Connection_RejectsOversizedMessages) {
 
     for (const auto& d : s_Out)
         CHECK(d.size() <= kMaxPacketSize);
+}
+
+// A burst of unreliable messages bigger than one flush goes out over the next flushes, in order;
+// only what is still waiting after kUnreliableHold is dropped.
+TEST(Connection_UnreliableBurstSpreadsOverFlushes) {
+    Connection s_Sender({ 1, 1 });
+    Connection s_Receiver({ 2, 2 });
+
+    for (int i = 0; i < 40; ++i) {
+        std::vector<uint8_t> s_Payload(1000, static_cast<uint8_t>(i));
+        s_Sender.SendUnreliable(MsgType::NpcSnapshot, std::move(s_Payload));
+    }
+
+    std::vector<std::vector<uint8_t>> s_Out;
+    s_Sender.Flush(0.0, s_Out);
+    CHECK_MSG(s_Out.size() <= Connection::kMaxPacketsPerFlush + 1, "%zu packets in one flush", s_Out.size());
+    const size_t s_First = s_Out.size();
+
+    for (double t = 1.0 / 60.0; t < 0.1; t += 1.0 / 60.0)
+        s_Sender.Flush(t, s_Out);
+
+    for (const auto& d : s_Out)
+        s_Receiver.Receive(d.data(), d.size(), 0.2);
+
+    Message s_Msg;
+    int s_Got = 0, s_Expected = 0;
+    bool s_InOrder = true;
+
+    while (s_Receiver.PopMessage(s_Msg)) {
+        if (s_Msg.type != MsgType::NpcSnapshot)
+            continue;
+
+        s_InOrder &= !s_Msg.payload.empty() && s_Msg.payload[0] == s_Expected;
+        ++s_Expected;
+        ++s_Got;
+    }
+
+    CHECK_MSG(s_Got == 40, "%d of 40 arrived (first flush %zu packets)", s_Got, s_First);
+    CHECK(s_InOrder);
+    CHECK(s_Sender.Stats().unreliableDropped == 0 && s_Sender.Stats().unreliableDeferred > 0);
+
+    // Waiting longer than the hold: stale, dropped.
+    for (int i = 0; i < 40; ++i)
+        s_Sender.SendUnreliable(MsgType::NpcSnapshot, std::vector<uint8_t>(1000, 1));
+
+    s_Out.clear();
+    s_Sender.Flush(1.0, s_Out);
+    s_Sender.Flush(1.0 + Connection::kUnreliableHold + 0.05, s_Out);
+    CHECK(s_Sender.Stats().unreliableDropped > 0);
 }
 
 TEST(Fuzz_ConnectionReceive) {
@@ -595,6 +712,35 @@ TEST(Interpolation_PlaysBackWithDelay) {
     stale.pos = { -100, 0, 0 };
     b.Push(2.1, 1000, stale);
     CHECK(b.Sample(5.0, out) && out.pos.x == 10.f);
+}
+
+// NPCs are sent only while they move: one standing 1.5 s and then walking must stand still in
+// playback until it really walks, not glide across the whole gap.
+TEST(Interpolation_StillGapIsHeld) {
+    SnapshotBuffer b(0.1);
+    b.SetHoldGap(0.6);
+    Transform x;
+    Transform out;
+
+    x.pos = { 0, 0, 0 };
+    b.Push(1.0, 1000, x); // stops here
+    x.pos = { 0.1f, 0, 0 };
+    b.Push(2.5, 2500, x); // walks off 1.5 s later
+    x.pos = { 0.2f, 0, 0 };
+    b.Push(2.567, 2567, x);
+
+    // 1.0 s into the stand (sender time 2.0, played back at 2.1): still where it stopped.
+    CHECK(b.Sample(2.1, out) && out.pos.x == 0.f);
+    // And just after it set off, moving as sent.
+    CHECK(b.Sample(2.6, out) && out.pos.x > 0.05f && out.pos.x <= 0.1f);
+
+    // Without the hold (the avatar stream, sent all the time), a gap is played across as before.
+    SnapshotBuffer c(0.1);
+    x.pos = { 0, 0, 0 };
+    c.Push(1.0, 1000, x);
+    x.pos = { 0.1f, 0, 0 };
+    c.Push(2.5, 2500, x);
+    CHECK(c.Sample(2.1, out) && out.pos.x > 0.f);
 }
 
 TEST(Interpolation_SmoothUnderJitter) {

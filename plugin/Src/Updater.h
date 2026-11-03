@@ -46,7 +46,10 @@ public:
 
     // Checks for a newer version than p_Version in the background, and stages it. update.txt from
     // p_ManifestUrl, else from p_FallbackUrl.
-    void Start(const std::string& p_GameDir, const std::string& p_Version, const std::string& p_ManifestUrl, const std::string& p_FallbackUrl = {});
+    // p_Reinstall: the same version too, when its files differ (the build for another game
+    // version is installed: the right one has the same version number).
+    void Start(const std::string& p_GameDir, const std::string& p_Version, const std::string& p_ManifestUrl, const std::string& p_FallbackUrl = {},
+        bool p_Reinstall = false);
     Status Get() const;
 
     // update.txt: "version <v>", "base <url>", "file <path> <size> <sha256>", then "notes" and the
@@ -57,7 +60,7 @@ public:
     static std::string Sha256(const std::string& p_Data);
 
 private:
-    void Run(std::string p_GameDir, std::string p_Version, std::string p_ManifestUrl, std::string p_FallbackUrl);
+    void Run(std::string p_GameDir, std::string p_Version, std::string p_ManifestUrl, std::string p_FallbackUrl, bool p_Reinstall);
     void Set(State p_State, const std::string& p_Version = {}, const std::string& p_Error = {});
 
     mutable std::mutex m_Mutex;

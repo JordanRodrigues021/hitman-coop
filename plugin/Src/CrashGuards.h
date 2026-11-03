@@ -41,6 +41,7 @@ namespace CrashGuards {
     bool IsStandInKnowledge(const void* p_Knowledge);
     // The partner's NPCs here (puppets): their AI reasoning is skipped too.
     void SetPuppet(void* p_Actor, bool p_Puppet);
+    bool IsPuppet(void* p_Actor);
     void ClearPuppets();
     size_t PuppetCount();
     // Lines the stand-in would have said, and alert levels it would have reached, since the start.

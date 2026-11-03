@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdio>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -9,6 +10,7 @@
 
 #include "Connection.h"
 #include "Interpolation.h"
+#include "Log.h"
 #include "Protocol.h"
 #include "Socket.h"
 
@@ -19,6 +21,11 @@ namespace coop {
 class IGameWorld {
 public:
     virtual ~IGameWorld() = default;
+
+    // The mod's log. The session asks LogEnabled first, so a quiet log costs no formatting.
+    // p_Category is one word (net, sync, npc, ...), for filtering.
+    virtual bool LogEnabled(LogLevel /*p_Level*/) const { return false; }
+    virtual void Log(LogLevel /*p_Level*/, const char* /*p_Category*/, const std::string& /*p_Text*/) {}
 
     // True once the local 47 exists in a loaded mission scene.
     virtual bool IsInScene() const = 0;
@@ -93,7 +100,7 @@ public:
 
 struct SessionConfig {
     std::string playerName = "Agent";
-    std::string modVersion = "0.13.2";
+    std::string modVersion = "0.13.94";
     std::string gameVersion = "unknown";
 
     double connectTimeout = 10.0;
@@ -102,11 +109,23 @@ struct SessionConfig {
     double alertInterval = 0.2;
     double npcInterval = 1.0 / 15.0;
     double ownerCheckInterval = 0.5;
-    float ownerHysteresis = 4.f;     // metres nearer the other player before an NPC changes hands
+    // Metres nearer the other player before an NPC changes hands, and the least time it then stays:
+    // every change wakes an AI whose orders are as old as the hand-over (4 m and no wait had NPCs
+    // between the players flip back and forth, sliding and walking through walls on resuming).
+    float ownerHysteresis = 8.f;
+    double ownerHoldTime = 5.0;
+    // A puppet whose stream has stopped this long runs its own AI again (the partner's copy isn't
+    // in their mission yet, or no longer: frozen here it stood or slid where nobody put it).
+    double puppetDataTimeout = 5.0;
     double npcPoseInterval = 1.0 / 12.0;
-    float npcPoseRange = 35.f;       // poses are sent for owned NPCs this near the other player
-    size_t npcPoseMax = 10;          // the nearest this many
-    float puppetNearRange = 60.f;    // puppets nearer the local player are placed every frame
+    // Poses are sent for owned NPCs this near the other player, the nearest this many: an NPC
+    // without one walks on its puppet's own legs (its last orders), moonwalking and sliding.
+    float npcPoseRange = 50.f;
+    size_t npcPoseMax = 32;
+    float npcPoseNear = 15.f;        // the nearest few within this get every round, within npcPoseMid every
+    float npcPoseMid = 30.f;         // other round, the rest every third
+    double npcPoseFullEvery = 2.0;   // a whole pose this often (between, only the bones that changed)
+    float puppetNearRange = 150.f;   // puppets nearer the local player are placed every frame
     double npcScanRate = 30.0;      // local NPC scans per second (deaths, drift correction)
     double interpolationDelay = 0.2; // 0.1 froze and jumped over the internet (Tailscale) whenever packets bunched up
     // Playback delay follows the link between these: about 70 ms on a LAN, more when packets bunch up.
@@ -114,7 +133,7 @@ struct SessionConfig {
     double interpolationMin = 0.08;
     double interpolationMax = 0.35;
     float npcFarRange = 60.f;        // owned NPCs farther than this from the partner are sent at a quarter of the rate
-    size_t npcPoseFullRate = 4;      // the nearest this many poses at the full rate, the rest at half
+    size_t npcPoseFullRate = 8;      // at most this many poses at the full rate
     // Waiting this long, at most, for a partner whose game said it is loading.
     double busyGraceMax = 180.0;
 
@@ -128,6 +147,20 @@ enum class SessionRole { None, Host, Client };
 enum class SessionState { Idle, Listening, Connecting, Connected, Failed };
 
 const char* SessionStateName(SessionState p_State);
+
+// The last sync check (MsgNpcCheck): the partner's NPC positions against ours.
+struct NpcSyncReport {
+    double at = -1.0;          // session time it was made; below 0: none yet
+    bool complete = true;      // every part of the partner's check arrived
+    size_t compared = 0;       // NPCs alive (or dead) in both games
+    size_t same = 0;           // within 1 m of each other
+    size_t fewMetres = 0;  // 1 to 5 m apart
+    size_t outOfPlace = 0; // more than 5 m apart
+    size_t onlyTheirs = 0;     // the partner's game lists it, ours doesn't
+    size_t onlyOurs = 0;
+    size_t lifeDiffers = 0;    // alive in one game, dead or knocked out in the other
+    std::string worst;         // the worst few, with why
+};
 
 struct SessionStatus {
     SessionRole role = SessionRole::None;
@@ -147,6 +180,7 @@ struct SessionStatus {
     size_t npcsPuppeted = 0;
     size_t npcsOwnedByClient = 0;
     std::string ownerCheck;
+    NpcSyncReport npcCheck;
     ConnectionStats stats;
     bool peerBusy = false;       // the partner's game is loading
     bool peerPaused = false;     // the partner has their pause menu open
@@ -233,6 +267,8 @@ private:
     void UpdateSharedNpcs(double p_Now);
     void SetOwners(const std::vector<NpcOwnership>& p_Changes);
     void ReconcilePuppets();
+    bool Streaming(uint64_t p_Id) const; // the partner's positions for this NPC are arriving
+    bool Unfollowing(uint64_t p_Id) const; // a puppet that wouldn't stay put, running its own AI a while
     void ReleasePuppets();
     void UpdatePuppets(double p_Now);
     uint8_t MyOwner() const { return m_Role == SessionRole::Client ? NpcOwner_Client : NpcOwner_Host; }
@@ -249,6 +285,56 @@ private:
     const std::vector<NpcState>& Npcs();
     std::vector<NpcState> m_NpcCache;
     bool m_NpcCacheValid = false;
+
+    // The log (see IGameWorld::Log): printf-style, formatted only when that level is on.
+    template <class... A>
+    void Log(LogLevel p_Level, const char* p_Category, const char* p_Format, A... p_Args) const {
+        if (!m_World.LogEnabled(p_Level))
+            return;
+
+        char s_Text[768];
+        std::snprintf(s_Text, sizeof(s_Text), p_Format, p_Args...);
+        m_World.Log(p_Level, p_Category, s_Text);
+    }
+
+    // What the 10-second health line (LogStats) reports, counted since the last one.
+    struct LogCounters {
+        uint32_t snapshotsOut = 0, npcsOut = 0, snapshotsIn = 0, npcsIn = 0;
+        uint32_t posesOut = 0, posesIn = 0;
+        uint32_t posesFullOut = 0, poseBonesOut = 0, posesWaiting = 0; // waiting: changes for a pose we hadn't got
+        uint32_t unfollowing = 0; // puppets that didn't stay where they were put, given their AI back
+        uint32_t ownerChanges = 0, puppetsOn = 0, puppetsOff = 0, staleReleased = 0;
+        // How far puppets had got from where we last put them (their legs keep walking).
+        double driftSum = 0.0;
+        uint32_t driftCount = 0;
+        float driftMax = 0.f;
+    };
+    LogCounters m_LogCount;
+    double m_NextStatsLog = 0.0;
+    double m_ConnectedAt = -1.0;
+    double m_LastStatsAt = -1.0;
+    uint64_t m_StatsBytesIn = 0;
+    uint64_t m_StatsBytesOut = 0;
+    void LogStats(double p_Now);
+
+    // The sync check: ours to the partner every 10 s, theirs put together and compared.
+    void SendNpcCheck(double p_Now);
+    void OnNpcCheck(const MsgNpcCheck& p_Msg, double p_Now);
+    void FinishNpcCheck(double p_Now);
+    double m_NextNpcCheck = 0.0;
+    uint16_t m_NpcCheckRound = 0;
+    struct CheckIn {
+        uint16_t round = 0;
+        uint8_t parts = 0;
+        uint8_t got = 0;
+        bool open = false;
+        double startedAt = 0.0;
+        std::vector<NpcCheckEntry> npcs;
+    } m_CheckIn;
+    NpcSyncReport m_LastCheck;
+    uint16_t m_CheckDone = 0; // the last round finished
+    void MeasurePuppetDrift();
+    std::string LinkSummary() const;
 
     // The link: congestion (less NPC detail while it lasts) and the bandwidth we use.
     void UpdateLink(double p_Now);
@@ -307,8 +393,9 @@ private:
     // NPCs known knocked out in either game (announced once).
     std::unordered_set<uint64_t> m_KnownDown;
     struct SentPose {
-        Pose pose;
-        double time = 0.0;
+        Pose pose;           // as the partner has it (packed and unpacked, as on the wire)
+        double time = -100.0;
+        double fullAt = -100.0;
     };
     std::unordered_map<uint64_t, SentPose> m_PoseSent; // the last pose sent of each NPC we run
     uint32_t m_PoseRound = 0;
@@ -406,24 +493,46 @@ private:
     // Shared NPCs
     std::unordered_map<uint64_t, uint8_t> m_NpcOwner; // both: who runs each NPC (absent: the host)
     struct Puppet {
+        // NPCs are sent only while they move (and every 2 s): a longer gap means it stood still.
+        Puppet() { xf.SetHoldGap(0.6); }
         SnapshotBuffer xf { 0.2 };
         PoseBuffer pose { 0.2 };
+        Pose poseNow;               // the stream's latest whole pose (changes laid over the last full one)
+        uint32_t poseTimeMs = 0;
+        bool hasPoseTime = false;
         double lastPose = -100.0;
+        double lastData = -100.0; // when its last position arrived
+        Transform placed;         // where we last put it (for the log's drift figure)
+        bool hasPlaced = false;
+        int offPlace = 0;           // drift checks in a row it was far from where we put it
         bool posed = false;
     };
+    std::unordered_map<uint64_t, double> m_OwnerChangedAt; // host: when each NPC last changed hands
+    double m_TickNow = 0.0;                                 // the time of the tick under way
     std::unordered_map<uint64_t, Puppet> m_Puppets;   // NPCs the partner runs, as they stream them
     std::unordered_set<uint64_t> m_Puppeted;          // NPCs the world has as puppets now
+    // Puppets that don't stay where they're put (the game moves them itself: a scripted walk, a
+    // ladder, a vehicle): their own AI runs until then, so at least their legs match their path.
+    std::unordered_map<uint64_t, double> m_UnfollowingUntil;
     Transform m_RemoteAvatarLast;
     bool m_HaveRemoteAvatar = false;
     double m_NextOwnerCheck = 0.0;
     // Host: NPCs the client's game says are after the client's 47 (hunting, arresting, fighting),
     // and until when (the client sends its alerts a few times a second).
     std::unordered_map<uint64_t, double> m_ClientChasedUntil;
+    // The NPC our 47 is in contact with (fighting, choking, subduing), standing, and until when:
+    // it must be run by our own game. On the client it was a puppet whose AI the partner's game
+    // ran, and fists went through it without a reaction. The host keeps its own; a client's is
+    // handed to it (and its own copy stops being a puppet at once).
+    uint64_t m_ContactId = 0;
+    double m_ContactUntil = -1.0;
+    bool InContact(uint64_t p_Id) const { return p_Id != 0 && p_Id == m_ContactId && m_LastTick < m_ContactUntil; }
     double m_NextNpcPoseSend = 0.0;
     uint32_t m_PuppetFrame = 0;
     std::vector<uint64_t> m_PoseIds;
-    MsgVictimPose m_NpcPoseSend;
+    MsgNpcPose m_NpcPoseSend;
     Pose m_NpcPoseScratch;
+    Pose m_NpcPoseRead;
     std::vector<NpcState> m_SharedScratch;
     std::string m_OwnerCheck;
     std::vector<ItemChange> m_ItemScratch;

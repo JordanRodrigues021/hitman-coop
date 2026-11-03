@@ -35,6 +35,7 @@ const char* MsgTypeName(MsgType p_Type) {
         case MsgType::Busy: return "Busy";
         case MsgType::NpcKnockedOut: return "NpcKnockedOut";
         case MsgType::PlayerState: return "PlayerState";
+        case MsgType::NpcCheck: return "NpcCheck";
         case MsgType::Pose: return "Pose";
         case MsgType::VictimPose: return "VictimPose";
         default: return "Unknown";
@@ -293,6 +294,136 @@ bool MsgVictimPose::Read(ByteReader& r) {
     return body.Read(r) && r.U64(id) && ReadTransform(r, xf) && r.U8(flags);
 }
 
+namespace {
+int16_t Millimetres(float p_Metres) {
+    return static_cast<int16_t>(std::clamp(std::lround(p_Metres * 1000.f), -32000L, 32000L));
+}
+}
+
+bool MsgNpcPose::ApplyTo(Pose& p_Base) const {
+    if (full) {
+        p_Base.rotations = rotations;
+    }
+    else {
+        if (p_Base.rotations.size() != boneCount || changed.size() != (boneCount + 7u) / 8u)
+            return false;
+
+        size_t s_Next = 0;
+
+        for (size_t i = 0; i < boneCount; ++i) {
+            if (!(changed[i / 8] & (1u << (i % 8))))
+                continue;
+
+            if (s_Next >= rotations.size())
+                return false;
+
+            p_Base.rotations[i] = rotations[s_Next++];
+        }
+    }
+
+    p_Base.rootPos = rootPos;
+    p_Base.pelvisPos = pelvisPos;
+    return true;
+}
+
+void MsgNpcPose::Write(ByteWriter& w) const {
+    w.U32(epoch);
+    w.U32(timeMs);
+    w.U64(id);
+
+    for (const Vec3* s_Pos : { &rootPos, &pelvisPos }) {
+        w.U16(static_cast<uint16_t>(Millimetres(s_Pos->x)));
+        w.U16(static_cast<uint16_t>(Millimetres(s_Pos->y)));
+        w.U16(static_cast<uint16_t>(Millimetres(s_Pos->z)));
+    }
+
+    const uint16_t s_Count = std::min<uint16_t>(boneCount, kMaxPoseBones);
+    w.U16(s_Count);
+    w.U8(full ? 1 : 0);
+
+    if (full) {
+        for (size_t i = 0; i < s_Count; ++i)
+            w.U32(PackQuat(i < rotations.size() ? rotations[i] : Quat {}));
+
+        return;
+    }
+
+    const size_t s_MaskBytes = (s_Count + 7u) / 8u;
+
+    for (size_t i = 0; i < s_MaskBytes; ++i)
+        w.U8(i < changed.size() ? changed[i] : 0);
+
+    // As many rotations as bits set (rotations beyond that are never written).
+    size_t s_Set = 0;
+
+    for (size_t i = 0; i < s_Count; ++i)
+        if (i / 8 < changed.size() && (changed[i / 8] & (1u << (i % 8))))
+            ++s_Set;
+
+    for (size_t i = 0; i < s_Set; ++i)
+        w.U32(PackQuat(i < rotations.size() ? rotations[i] : Quat {}));
+}
+
+bool MsgNpcPose::Read(ByteReader& r) {
+    if (!r.U32(epoch) || !r.U32(timeMs) || !r.U64(id))
+        return false;
+
+    for (Vec3* s_Pos : { &rootPos, &pelvisPos }) {
+        uint16_t s_X, s_Y, s_Z;
+
+        if (!r.U16(s_X) || !r.U16(s_Y) || !r.U16(s_Z))
+            return false;
+
+        s_Pos->x = static_cast<int16_t>(s_X) / 1000.f;
+        s_Pos->y = static_cast<int16_t>(s_Y) / 1000.f;
+        s_Pos->z = static_cast<int16_t>(s_Z) / 1000.f;
+    }
+
+    uint8_t s_Full = 0;
+
+    if (!r.U16(boneCount) || !r.U8(s_Full))
+        return false;
+
+    if (boneCount > kMaxPoseBones || s_Full > 1)
+        return r.Fail();
+
+    full = s_Full != 0;
+    changed.clear();
+    rotations.clear();
+    size_t s_Rotations = boneCount;
+
+    if (!full) {
+        changed.resize((boneCount + 7u) / 8u);
+        s_Rotations = 0;
+
+        for (auto& s_Byte : changed) {
+            if (!r.U8(s_Byte))
+                return false;
+        }
+
+        // Bits past the last bone must be clear.
+        if (boneCount % 8 && !changed.empty() && (changed.back() >> (boneCount % 8)))
+            return r.Fail();
+
+        for (const uint8_t s_Byte : changed)
+            for (int b = 0; b < 8; ++b)
+                s_Rotations += (s_Byte >> b) & 1u;
+    }
+
+    rotations.resize(s_Rotations);
+
+    for (auto& s_Rot : rotations) {
+        uint32_t s_Packed = 0;
+
+        if (!r.U32(s_Packed))
+            return false;
+
+        s_Rot = UnpackQuat(s_Packed);
+    }
+
+    return true;
+}
+
 void MsgPose::Write(ByteWriter& w) const {
     w.U32(epoch);
     w.U32(timeMs);
@@ -516,6 +647,46 @@ bool MsgAlerts::Read(ByteReader& r) {
     for (auto& s_Alert : alerts)
         if (!r.U64(s_Alert.id) || !r.U8(s_Alert.tension))
             return false;
+
+    return true;
+}
+
+void MsgNpcCheck::Write(ByteWriter& w) const {
+    w.U32(epoch);
+    w.U16(round);
+    w.U8(part);
+    w.U8(parts);
+    w.U16(total);
+    const size_t s_Count = std::min(npcs.size(), kMaxNpcChecksPerMsg);
+    w.U8(static_cast<uint8_t>(s_Count));
+
+    for (size_t i = 0; i < s_Count; ++i) {
+        w.U64(npcs[i].id);
+        w.F32(npcs[i].pos.x);
+        w.F32(npcs[i].pos.y);
+        w.F32(npcs[i].pos.z);
+        w.U8(npcs[i].flags);
+    }
+}
+
+bool MsgNpcCheck::Read(ByteReader& r) {
+    uint8_t s_Count;
+
+    if (!r.U32(epoch) || !r.U16(round) || !r.U8(part) || !r.U8(parts) || !r.U16(total) || !r.U8(s_Count))
+        return false;
+
+    if (s_Count > kMaxNpcChecksPerMsg || parts == 0 || part >= parts)
+        return r.Fail();
+
+    npcs.resize(s_Count);
+
+    for (auto& s_Npc : npcs) {
+        if (!r.U64(s_Npc.id) || !r.F32(s_Npc.pos.x) || !r.F32(s_Npc.pos.y) || !r.F32(s_Npc.pos.z) || !r.U8(s_Npc.flags))
+            return false;
+
+        if (!std::isfinite(s_Npc.pos.x) || !std::isfinite(s_Npc.pos.y) || !std::isfinite(s_Npc.pos.z))
+            return r.Fail();
+    }
 
     return true;
 }
