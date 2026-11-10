@@ -1,11 +1,16 @@
 #include "coop/Socket.h"
 
+#include <algorithm>
 #include <cstdlib>
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <iphlpapi.h>
+
+#include <vector>
 
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "iphlpapi.lib")
 
 namespace coop {
 
@@ -120,12 +125,29 @@ bool ResolveEndpoint(const std::string& p_Address, uint16_t p_DefaultPort, Endpo
         return false;
     }
 
-    std::string s_Host = p_Address;
+    // Pasted from a chat, an address often comes with a space, a tab or a line end around it: those
+    // made "100.64.1.2:47047 " an "Invalid port".
+    std::string s_Address = p_Address;
+    const auto s_Space = [](char c) { return c == ' ' || c == 9 || c == 13 || c == 10; };
+
+    while (!s_Address.empty() && s_Space(s_Address.front()))
+        s_Address.erase(s_Address.begin());
+
+    while (!s_Address.empty() && s_Space(s_Address.back()))
+        s_Address.pop_back();
+
+    // Co-op is IPv4 only: an IPv6 address said so, instead of failing as a "port".
+    if (std::count(s_Address.begin(), s_Address.end(), ':') > 1) {
+        p_Error = "IPv6 addresses aren't supported: use the host's IPv4 address (like 100.64.1.2 or 192.168.1.20), or a join code";
+        return false;
+    }
+
+    std::string s_Host = s_Address;
     uint16_t s_Port = p_DefaultPort;
 
-    if (const auto s_Colon = p_Address.rfind(':'); s_Colon != std::string::npos) {
-        s_Host = p_Address.substr(0, s_Colon);
-        const std::string s_PortStr = p_Address.substr(s_Colon + 1);
+    if (const auto s_Colon = s_Address.rfind(':'); s_Colon != std::string::npos) {
+        s_Host = s_Address.substr(0, s_Colon);
+        const std::string s_PortStr = s_Address.substr(s_Colon + 1);
 
         char* s_End = nullptr;
         const long s_Value = std::strtol(s_PortStr.c_str(), &s_End, 10);
@@ -201,35 +223,42 @@ std::string LocalLanAddress() {
 }
 
 std::string LocalTailscaleAddress() {
-    if (!EnsureWinsock())
+    // The network adapters' own addresses, read locally (no name lookup: looking up this PC's
+    // name could wait on the network for seconds, and the mod checks every 15 s while idle). Only
+    // an adapter that is up counts: a Tailscale that is installed but off has none.
+    ULONG s_Size = 16 * 1024;
+    std::vector<uint8_t> s_Buffer;
+    ULONG s_Result = ERROR_BUFFER_OVERFLOW;
+
+    for (int s_Try = 0; s_Try < 3 && s_Result == ERROR_BUFFER_OVERFLOW; ++s_Try) {
+        s_Buffer.resize(s_Size);
+        s_Result = GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, nullptr,
+            reinterpret_cast<IP_ADAPTER_ADDRESSES*>(s_Buffer.data()), &s_Size);
+    }
+
+    if (s_Result != NO_ERROR)
         return {};
 
-    char s_Name[256] {};
+    for (auto* s_Adapter = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(s_Buffer.data()); s_Adapter; s_Adapter = s_Adapter->Next) {
+        if (s_Adapter->OperStatus != IfOperStatusUp)
+            continue;
 
-    if (gethostname(s_Name, sizeof(s_Name)) != 0)
-        return {};
+        for (auto* s_Unicast = s_Adapter->FirstUnicastAddress; s_Unicast; s_Unicast = s_Unicast->Next) {
+            if (!s_Unicast->Address.lpSockaddr || s_Unicast->Address.lpSockaddr->sa_family != AF_INET)
+                continue;
 
-    addrinfo s_Hints {};
-    s_Hints.ai_family = AF_INET;
-    addrinfo* s_Result = nullptr;
+            const uint32_t s_Ip = ntohl(reinterpret_cast<const sockaddr_in*>(s_Unicast->Address.lpSockaddr)->sin_addr.s_addr);
 
-    if (getaddrinfo(s_Name, nullptr, &s_Hints, &s_Result) != 0 || !s_Result)
-        return {};
-
-    std::string s_Found;
-
-    for (const addrinfo* s_It = s_Result; s_It && s_Found.empty(); s_It = s_It->ai_next) {
-        const uint32_t s_Ip = ntohl(reinterpret_cast<const sockaddr_in*>(s_It->ai_addr)->sin_addr.s_addr);
-
-        // Tailscale hands out addresses from the carrier-grade NAT block 100.64.0.0/10.
-        if ((s_Ip & 0xFFC00000u) == 0x64400000u) {
-            s_Found = Endpoint { s_Ip, 0 }.ToString();
-            s_Found.resize(s_Found.rfind(':'));
+            // Tailscale hands out addresses from the carrier-grade NAT block 100.64.0.0/10.
+            if ((s_Ip & 0xFFC00000u) == 0x64400000u) {
+                std::string s_Found = Endpoint { s_Ip, 0 }.ToString();
+                s_Found.resize(s_Found.rfind(':'));
+                return s_Found;
+            }
         }
     }
 
-    freeaddrinfo(s_Result);
-    return s_Found;
+    return {};
 }
 
 } // namespace coop

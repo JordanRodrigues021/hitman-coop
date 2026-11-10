@@ -58,7 +58,9 @@ python -I tools/gametest/gametest.py installers netsim
 ```
 
 Version strings: `core/include/coop/Session.h` (modVersion), `plugin/Src/CoopText.h`
-(c_ModVersion), `installer/setup/Setup.cs`, `installer/setup/setup.manifest`, `installer/README.txt`.
+(c_ModVersion), `core/res/Version.h` (the DLL's and Test-Connection.exe's version resource),
+`installer/setup/Setup.cs` (the constant and the Assembly*Version attributes),
+`installer/setup/setup.manifest`, `installer/README.txt`. Packaging checks they agree.
 The network protocol is `kProtocolVersion` in `core/include/coop/Protocol.h`: raise it whenever a
 message changes, so mismatched versions refuse each other with a clear message.
 
@@ -85,6 +87,36 @@ the game starts, download the files that differ, and use them from the next star
 `plugin/Src/Updater.h`). Every release must have both manifests, or players stop getting updates.
 Set `update_url = <url of a manifest>` under `[general]` in `HitmanCoop.ini` to try an update from
 somewhere else; plain http is allowed only to 127.0.0.1.
+
+### Signed updates
+
+Since 0.13.95 the mod takes an `update.txt` only with a matching `update.txt.sig` next to it (an
+ECDSA P-256 signature with the key in `.signing/update-key.blob`, made once by
+`tools/update-key.ps1 -Create`; the public half is `plugin/Src/UpdateKey.h`). `tools/package.ps1`
+signs both manifests; the `.sig` files go on the `updates` branch and the release with them.
+`.signing/` never leaves the release PC: keep a backup of it somewhere safe, because without it no
+released mod can be updated any more. Test servers on `http://127.0.0.1` are let through unsigned.
+
+### Signing the downloads (antivirus, SmartScreen, Chrome)
+
+Unsigned, new and rarely downloaded files are what SmartScreen, Chrome and some antivirus products
+warn about or quarantine, and a game mod that hooks the game looks suspicious to their heuristics on
+top. What the downloads do about it themselves: the setup does all of its work in C# (no PowerShell,
+nothing hidden, no `-ExecutionPolicy Bypass`), the zip has no batch files, and every exe and DLL of
+ours has a full version resource. What only the publisher can do:
+
+- Sign the files. `tools/package.ps1` signs the setups, `HitmanCoop.dll` and Test-Connection.exe
+  when signing is set up, and `-RequireSigning` refuses to package without it:
+  - Azure Trusted Signing (about $10 a month, identity checked by Microsoft, trusted by SmartScreen
+    soonest): set `HITMANCOOP_SIGN_DLIB` (the path of `Azure.CodeSigning.Dlib.dll`) and
+    `HITMANCOOP_SIGN_METADATA` (its `metadata.json`).
+  - Any code signing certificate as a .pfx: `HITMANCOOP_SIGN_PFX`, `HITMANCOOP_SIGN_PASSWORD`.
+  - Free for open-source projects: SignPath Foundation (signpath.org), signing in CI.
+  signtool.exe comes with the Windows SDK.
+- Report each release as a false positive: https://www.microsoft.com/wdsi/filesubmission ("Software
+  developer", the setup and the zip), and to any other vendor that flags it (VirusTotal shows which).
+  Microsoft usually clears a file within a day or two, and a signed publisher's files from then on
+  build reputation instead of starting over.
 
 To build in a default co-op server, add `-DCOOP_DEFAULT_RELAY=relay.example.com:47100` to the
 configure step. Without it, players set the server under Settings in the CO-OP window, or use

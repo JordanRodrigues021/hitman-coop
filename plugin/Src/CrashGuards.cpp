@@ -303,6 +303,48 @@ void CrashGuards::SetPuppet(void* p_Actor, bool p_Puppet) {
         RebuildSkipList();
 }
 
+size_t CrashGuards::RefreshPuppetUnits(bool (*p_Alive)(void* p_Context, void* p_Actor), void* p_Context) {
+    std::vector<void*> s_Actors;
+    {
+        std::lock_guard s_Lock(g_SkipMutex);
+        s_Actors.reserve(g_PuppetActors.size());
+
+        for (const auto& [s_Actor, s_Unit] : g_PuppetActors)
+            s_Actors.push_back(s_Actor);
+    }
+
+    // Read outside the lock, only from actors the caller just found in the scene.
+    std::vector<std::pair<void*, void*>> s_Fresh;
+    s_Fresh.reserve(s_Actors.size());
+
+    for (void* s_Actor : s_Actors)
+        s_Fresh.emplace_back(s_Actor, p_Alive(p_Context, s_Actor) ? UnitOf(s_Actor) : reinterpret_cast<void*>(-1));
+
+    std::lock_guard s_Lock(g_SkipMutex);
+    size_t s_Changed = 0;
+
+    for (const auto& [s_Actor, s_Unit] : s_Fresh) {
+        const auto s_It = g_PuppetActors.find(s_Actor);
+
+        if (s_It == g_PuppetActors.end())
+            continue;
+
+        if (s_Unit == reinterpret_cast<void*>(-1)) {
+            g_PuppetActors.erase(s_It);
+            ++s_Changed;
+        }
+        else if (s_It->second != s_Unit) {
+            s_It->second = s_Unit;
+            ++s_Changed;
+        }
+    }
+
+    if (s_Changed)
+        RebuildSkipList();
+
+    return s_Changed;
+}
+
 bool CrashGuards::IsPuppet(void* p_Actor) {
     std::lock_guard s_Lock(g_SkipMutex);
     return g_PuppetActors.contains(p_Actor);

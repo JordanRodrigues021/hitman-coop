@@ -1,3 +1,32 @@
+HITMAN Co-op 0.13.95 (beta)
+
+Install and antivirus
+- A new setup: one Install button, then how you'll connect. It does everything itself (no hidden PowerShell or batch files any more, the pattern that made antivirus products and Chrome flag earlier downloads as a "trojan"), checks every file before and after installing, and tells you exactly which file an antivirus took and how to get it back.
+- Tailscale set up for you: the setup downloads Tailscale's official installer, checks it is really signed by Tailscale, installs it, opens the sign-in page and shows your Tailscale address with a Copy button and your partner's PC once it's on your network.
+- HITMAN Co-op is in Settings > Apps now, with Uninstall. Updating no longer breaks the uninstall (it used to put back the old version's mod loader), and the uninstall cleans up the mod's logs.
+- Updates are signed: the mod only installs an update signed by its author.
+- No more surprise box from the mod loader on the first start ("Enable Crash Reporting?", which left the game paused behind it), and no notices asking you to update the mod loader (a newer one breaks HITMAN Co-op). The uninstall puts those settings back.
+
+"Your account signed in on another computer"
+- The mod no longer holds back any of the game's own online events (it used to, for NPCs killed only to match your partner's game): the first suspect for these errors since 0.13.
+- The mod now tells you when Steam or HITMAN's servers drop and why: both of you on one Steam account, a copy borrowed through Family Sharing, or a Tailscale exit node. CO-OP > About > Copy diagnostics has an "Online" line with the history.
+
+Bodies
+- A body that can't be moved to where your partner left it no longer vanishes: it stays in view (your guards ignore it), and is tried again twice.
+- Bodies are only moved out of sight when nobody is near; in front of you they move in plain view instead of disappearing.
+- Dragged bodies follow your partner's drag more closely (no more lagging and yanking), tumble less, and hop free when caught on a step, a railing or a chair.
+
+NPCs
+- The fix against blinking and moonwalking NPCs from 0.13.94 never reached the game: the NPC detail setting overwrote it every frame (10 NPCs within 35 m). Normal detail now animates 32 NPCs within 50 m, high 40 within 60 m.
+- NPCs that ignored a knock-out or a shot: an NPC you hit (shot, thrown item, blow) that your partner's game was running is now run by your game from that moment, so it reacts.
+- An NPC could stay frozen with its AI off after another NPC took its place in the game's lists. Checked and corrected every second now.
+
+Connection
+- Tailscale addresses: shown in the CO-OP window as soon as Tailscale connects (not only at game start), with a Copy button; joining a Tailscale address while Tailscale is off here says so at once.
+- Addresses pasted with spaces or line breaks work; an IPv6 address says co-op needs IPv4.
+- Messages that need resending back off on a bad connection instead of adding to the load.
+- Bug reports include the setup's log.
+
 HITMAN Co-op 0.13.94 (beta)
 
 - Dragging bodies: the body your partner drags now moves with them on your screen, in their arms, and lies where they leave it. Before, they dragged nothing and the body vanished once dropped.

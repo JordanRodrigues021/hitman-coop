@@ -58,6 +58,9 @@ public:
     // -1, 0 or 1 as a is older than, the same as, or newer than b ("0.13.0" against "0.12.2").
     static int CompareVersions(const std::string& p_A, const std::string& p_B);
     static std::string Sha256(const std::string& p_Data);
+    // p_Text signed with the update key (UpdateKey.h): an ECDSA P-256 signature over its SHA-256,
+    // 64 bytes (r, s) in base64, as tools/update-key.ps1 writes it.
+    static bool VerifySignature(const std::string& p_Text, const std::string& p_SignatureBase64);
 
 private:
     void Run(std::string p_GameDir, std::string p_Version, std::string p_ManifestUrl, std::string p_FallbackUrl, bool p_Reinstall);

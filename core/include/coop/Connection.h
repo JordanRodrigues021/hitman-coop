@@ -80,6 +80,7 @@ private:
         MsgType type;
         std::vector<uint8_t> payload;
         double lastSent = -1.0;
+        uint8_t sends = 0; // each resend waits twice as long as the last (up to 1 s)
         bool acked = false;
     };
 

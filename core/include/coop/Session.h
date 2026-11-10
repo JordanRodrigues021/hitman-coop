@@ -100,7 +100,7 @@ public:
 
 struct SessionConfig {
     std::string playerName = "Agent";
-    std::string modVersion = "0.13.94";
+    std::string modVersion = "0.13.95";
     std::string gameVersion = "unknown";
 
     double connectTimeout = 10.0;
@@ -232,6 +232,11 @@ public:
     // Our player restarted p_Scene (not one restarted for the partner): theirs restarts too.
     void OnLocalRestart(const std::string& p_Scene);
 
+    // Our 47 hit an NPC (a shot, a thrown item, a blow): if the partner's game runs it (a puppet
+    // here, whose AI is off and ignores the hit), ours runs it from now on for a few seconds, and the
+    // host is told (a client's claim). Called again while the fight goes on, it keeps the claim.
+    void ClaimNpc(uint64_t p_Id, double p_Now);
+
     // Client only: the mission the host is in.
     bool GetHostScene(SceneDesc& p_Out) const;
 
@@ -303,6 +308,7 @@ private:
         uint32_t posesOut = 0, posesIn = 0;
         uint32_t posesFullOut = 0, poseBonesOut = 0, posesWaiting = 0; // waiting: changes for a pose we hadn't got
         uint32_t unfollowing = 0; // puppets that didn't stay where they were put, given their AI back
+        uint32_t claims = 0;      // NPCs our 47 hit, taken over from the partner's game
         uint32_t ownerChanges = 0, puppetsOn = 0, puppetsOff = 0, staleReleased = 0;
         // How far puppets had got from where we last put them (their legs keep walking).
         double driftSum = 0.0;
@@ -526,7 +532,13 @@ private:
     // handed to it (and its own copy stops being a puppet at once).
     uint64_t m_ContactId = 0;
     double m_ContactUntil = -1.0;
-    bool InContact(uint64_t p_Id) const { return p_Id != 0 && p_Id == m_ContactId && m_LastTick < m_ContactUntil; }
+    // NPCs our 47 hit (ClaimNpc), ours to run until then.
+    std::unordered_map<uint64_t, double> m_ClaimedUntil;
+    bool Claimed(uint64_t p_Id) const {
+        const auto s_It = m_ClaimedUntil.find(p_Id);
+        return s_It != m_ClaimedUntil.end() && m_LastTick < s_It->second;
+    }
+    bool InContact(uint64_t p_Id) const { return p_Id != 0 && ((p_Id == m_ContactId && m_LastTick < m_ContactUntil) || Claimed(p_Id)); }
     double m_NextNpcPoseSend = 0.0;
     uint32_t m_PuppetFrame = 0;
     std::vector<uint64_t> m_PoseIds;

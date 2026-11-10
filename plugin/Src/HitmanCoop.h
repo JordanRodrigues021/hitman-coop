@@ -125,6 +125,14 @@ private:
     // Shots that hit the partner's stand-in since the last frame (no harm: their game decides).
     std::atomic<int> m_FriendlyHits { 0 };
     double m_FriendlyToldAt = -100.0;
+    // Steam account check sent to the partner this connection (see OnlineWatch).
+    bool m_AccountSent = false;
+    // [online] hide_partner_kills_from_game: the old way, dropping the game's own online events for
+    // NPCs killed only to match the partner's game. Off: never touch the game's online events
+    // (dropping them is the first suspect for "signed in on another computer").
+    std::atomic<bool> m_HidePartnerKills { false };
+    double m_NextTailscaleCheck = 0.0;
+    std::atomic<bool> m_TailscaleCopied { false };
 
     // Teamwork: ready checks, the 3-2-1 countdown, signals and "come to me" (as mission events).
     bool OnTeamEvent(const std::string& p_Name, const std::string& p_Json);

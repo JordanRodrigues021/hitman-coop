@@ -663,6 +663,22 @@ void SdkWorld::UpdatePoses() {
 
     UpdateStandInItem();
 
+    // Once a second: the AI switched off for puppets still points at the right NPCs (see
+    // CrashGuards::RefreshPuppetUnits), and puppets gone from the scene are let go.
+    if (m_InScene && m_Now >= m_NextUnitCheck) {
+        m_NextUnitCheck = m_Now + 1.0;
+        std::unordered_set<void*> s_Alive;
+
+        for (const auto& [s_Id, s_Npc] : m_NpcsById)
+            if (s_Npc)
+                s_Alive.insert(s_Npc);
+
+        if (const size_t s_Changed = CrashGuards::RefreshPuppetUnits(
+                [](void* p_Set, void* p_Actor) { return static_cast<std::unordered_set<void*>*>(p_Set)->contains(p_Actor); }, &s_Alive);
+            s_Changed && m_Trace)
+            m_Trace("npc: " + std::to_string(s_Changed) + " puppet AI switches pointed again (an NPC's runtime id changed, or it left)");
+    }
+
     if (m_InScene) {
         if (auto s_Player = SDK()->GetLocalPlayer())
             s_Source = s_Player.m_pInterfaceRef->m_pMorphemeEntity.m_entityRef.QueryInterface<IBoneAnimator>();
@@ -750,6 +766,12 @@ void BonesToPose(const std::vector<PoseHook::Bone>& p_Bones, coop::Pose& p_Out) 
     for (size_t i = 0; i < p_Bones.size(); ++i) {
         const auto& s_R = p_Bones[i].rot;
         p_Out.rotations[i] = { s_R[0], s_R[1], s_R[2], s_R[3] };
+    }
+
+    // (A capture that came back short, a skeleton not ready yet: no root to read, not a crash.)
+    if (p_Bones.size() < 2) {
+        p_Out.rootPos = p_Out.pelvisPos = {};
+        return;
     }
 
     p_Out.rootPos = { p_Bones[0].pos[0], p_Bones[0].pos[1], p_Bones[0].pos[2] };
@@ -1509,6 +1531,54 @@ private:
     IType* m_Type = nullptr;
     void* m_Data = nullptr;
 };
+}
+
+uint64_t SdkWorld::NpcIdOf(ZActor* p_Actor) const {
+    if (!p_Actor || !m_InScene || p_Actor == m_PartnerActor)
+        return 0;
+
+    ZEntityRef s_Ref;
+    p_Actor->GetID(s_Ref);
+
+    if (!s_Ref || !s_Ref->GetType())
+        return 0;
+
+    const uint64_t s_Id = s_Ref->GetType()->m_nEntityID;
+    const auto s_It = m_NpcsById.find(s_Id);
+    return s_It != m_NpcsById.end() && s_It->second == p_Actor ? s_Id : 0;
+}
+
+bool SdkWorld::HitByOurPlayer(const void* p_HitInfo) const {
+    // Where SHitInfo keeps m_rWeaponOwner, looked up once in the game's type registry.
+    static int64_t s_Offset = -2;
+
+    if (s_Offset == -2) {
+        s_Offset = -1;
+        STypeID* s_Id = (*Globals::TypeRegistry)->GetTypeID(ZString("SHitInfo"));
+        const IType* s_Type = s_Id ? s_Id->GetTypeInfo() : nullptr;
+
+        if (s_Type && s_Type->IsClass()) {
+            const auto* s_Class = reinterpret_cast<const IClassType*>(s_Type);
+
+            for (uint16_t i = 0; i < s_Class->m_nProperties; ++i) {
+                const auto& s_Property = s_Class->m_pProperties[i];
+                const IType* s_FieldType = s_Property.m_propertyInfo.m_Type ? s_Property.m_propertyInfo.m_Type->GetTypeInfo() : nullptr;
+
+                if (s_Property.m_pszPropertyName && std::strcmp(s_Property.m_pszPropertyName, "m_rWeaponOwner") == 0 && s_FieldType &&
+                    s_FieldType->m_nTypeSize == sizeof(ZEntityRef))
+                    s_Offset = s_Property.m_propertyInfo.m_nExtraData;
+            }
+        }
+    }
+
+    auto s_Player = SDK()->GetLocalPlayer();
+
+    if (s_Offset < 0 || !p_HitInfo || !s_Player)
+        return false;
+
+    ZEntityRef s_Owner;
+    std::memcpy(&s_Owner, static_cast<const uint8_t*>(p_HitInfo) + s_Offset, sizeof(ZEntityRef));
+    return s_Owner.GetEntity() && s_Owner.GetEntity() == s_Player.m_entityRef.GetEntity();
 }
 
 std::string SdkWorld::KnockOutTest(uint32_t p_DeathType, uint32_t p_DeathContext) {
@@ -3264,21 +3334,37 @@ float SdkWorld::PullBody(MovedBody& p_Body, float p_Dt) {
     if (!ActorTransform(p_Body.actor, s_Is))
         return 99.f;
 
-    // Its speed, from where it was last frame (smoothed: a ragdoll's root jitters).
+    // Its speed, from where it was last frame, smoothed over ~80 ms whatever the frame rate (a
+    // ragdoll's root jitters; a fixed half-and-half blend was jumpy at 144 fps and sluggish at 30).
     if (p_Body.hasPrev && p_Dt > 0.f) {
         const coop::Vec3 s_Inst = (s_Is.pos - p_Body.prev) * (1.f / p_Dt);
-        p_Body.vel = p_Body.vel * 0.5f + s_Inst * 0.5f;
+        const float s_Blend = 1.f - std::exp(-p_Dt / 0.08f);
+        p_Body.vel = p_Body.vel + (s_Inst - p_Body.vel) * s_Blend;
     }
 
     p_Body.prev = s_Is.pos;
     p_Body.hasPrev = true;
 
-    const coop::Vec3 s_Err = p_Body.want.pos - s_Is.pos;
+    // Held by the partner: where their body is heading a moment from now (it moves on while ours
+    // catches up), but never more than half a metre ahead.
+    coop::Vec3 s_Target = p_Body.want.pos;
+
+    if (p_Body.stage == MovedBody::Held && p_Body.wantAt >= 0.0) {
+        coop::Vec3 s_Lead = p_Body.wantVel * 0.12f;
+        s_Lead.z = 0.f;
+
+        if (const float s_Len = std::sqrt(s_Lead.x * s_Lead.x + s_Lead.y * s_Lead.y); s_Len > 0.5f)
+            s_Lead = s_Lead * (0.5f / s_Len);
+
+        s_Target = s_Target + s_Lead;
+    }
+
+    const coop::Vec3 s_Err = s_Target - s_Is.pos;
     const float s_Flat = std::sqrt(s_Err.x * s_Err.x + s_Err.y * s_Err.y);
     const float s_Off = coop::Distance(s_Is.pos, p_Body.want.pos);
     ZRagdollHandler* s_Ragdoll = p_Body.actor->m_pRagdollHandler;
 
-    if (!s_Ragdoll || p_Dt <= 0.f)
+    if (!s_Ragdoll || p_Dt <= 0.f || p_Body.stage == MovedBody::Waiting)
         return s_Off;
 
     // The speed wanted: towards the place, at most a brisk drag, nothing once there.
@@ -3296,15 +3382,21 @@ float SdkWorld::PullBody(MovedBody& p_Body, float p_Dt) {
     if (s_ChangeLen > 2.f)
         s_Change = s_Change * (2.f / s_ChangeLen);
 
-    // Up a step or a stair: a little lift while the place is higher (never a throw).
-    if (s_Err.z > 0.25f && s_Flat < 2.5f)
+    // Up a step or a stair: a little lift while the place is higher (never a throw). Caught on
+    // something (a railing, a low wall, a chair) for a while: a short hop at a set rising speed (the
+    // controller stops pushing once it rises that fast, so it can't fling the body).
+    if (m_Now < p_Body.hopUntil)
+        s_Change.z = std::clamp(1.6f - p_Body.vel.z, 0.f, 1.2f);
+    else if (s_Err.z > 0.25f && s_Flat < 2.5f)
         s_Change.z = std::clamp(std::min(2.f, s_Err.z * 3.f) - p_Body.vel.z, 0.f, 1.5f);
 
     const float s_Gain = c_PullGain * std::clamp(p_Dt * 60.f, 0.25f, 3.f);
-    const float4 s_At(s_Is.pos.x, s_Is.pos.y, s_Is.pos.z + 0.3f, 1.f);
+    // Pushed near its root: pushes far from a bone turn it, and a body pushed 0.3 m up its back
+    // tumbled and flailed on the way.
+    const float4 s_At(s_Is.pos.x, s_Is.pos.y, s_Is.pos.z + m_PullLever, 1.f);
     const float4 s_Push(s_Change.x * s_Gain, s_Change.y * s_Gain, s_Change.z * s_Gain, 0.f);
 
-    for (uint32_t b = 0; b < c_PullBones; ++b)
+    for (uint32_t b = 0; b < std::min<uint32_t>(m_PullBoneCount, c_PullBones); ++b)
         Functions::ZRagdollHandler_ApplyImpulseOnRagdoll->Call(s_Ragdoll, s_At, s_Push, b, false);
 
     return s_Off;
@@ -3319,10 +3411,11 @@ void SdkWorld::HoldBody(uint64_t p_Id, ZActor* p_Actor, const coop::Transform& p
     if (s_Body.actor != p_Actor) {
         s_Body = {};
         s_Body.actor = p_Actor;
-        s_Body.since = m_Now;
+        s_Body.since = s_Body.progressAt = m_Now;
         coop::Transform s_Was;
         ActorTransform(p_Actor, s_Was);
         s_Body.startOff = coop::Distance(s_Was.pos, p_Xf.pos);
+        s_Body.startPos = s_Was.pos;
 
         if (m_Trace) {
             char s_Text[200];
@@ -3335,7 +3428,29 @@ void SdkWorld::HoldBody(uint64_t p_Id, ZActor* p_Actor, const coop::Transform& p
     // Picked up again (by the partner) while it settled.
     if (s_Body.stage != MovedBody::Held) {
         s_Body.stage = MovedBody::Held;
-        s_Body.since = m_Now;
+        s_Body.since = s_Body.progressAt = m_Now;
+        s_Body.bestOff = 1e9f;
+        s_Body.hops = 0;
+    }
+
+    // The drag's own speed (smoothed: the stream comes in steps).
+    if (s_Body.wantAt >= 0.0 && m_Now - s_Body.wantAt > 0.005) {
+        const float s_Dt = static_cast<float>(std::min(m_Now - s_Body.wantAt, 0.25));
+        const coop::Vec3 s_Inst = (p_Xf.pos - s_Body.wantPrev) * (1.f / s_Dt);
+        s_Body.wantVel = s_Body.wantVel + (s_Inst - s_Body.wantVel) * 0.3f;
+    }
+
+    if (s_Body.wantAt < 0.0 || m_Now - s_Body.wantAt > 0.005) {
+        s_Body.wantPrev = p_Xf.pos;
+        s_Body.wantAt = m_Now;
+    }
+
+    // Shown again if it was being moved out of sight: someone is dragging it now.
+    if (s_Body.hiddenMove) {
+        s_Body.hiddenMove = false;
+        ZEntityRef s_Ref;
+        p_Actor->GetID(s_Ref);
+        s_Ref.SetProperty("m_bVisible", true);
     }
 
     s_Body.drag = true;
@@ -3350,10 +3465,21 @@ void SdkWorld::LetGoBody(uint64_t p_Id) {
         return;
 
     s_It->second.stage = MovedBody::Settling;
-    s_It->second.since = m_Now;
+    s_It->second.since = s_It->second.progressAt = m_Now;
+    s_It->second.bestOff = 1e9f;
+    s_It->second.wantVel = {};
 
     if (m_Trace)
         m_Trace(std::string("body: ") + s_It->second.actor->m_sActorName.c_str() + " let go of by the partner");
+}
+
+bool SdkWorld::SomeoneNear(const coop::Vec3& p_Pos, float p_Range) const {
+    coop::Transform s_Local;
+
+    if (GetLocalAvatar(s_Local) && coop::Distance(s_Local.pos, p_Pos) < p_Range)
+        return true;
+
+    return m_HasPartnerSentXf && coop::Distance(m_PartnerSentXf.pos, p_Pos) < p_Range;
 }
 
 void SdkWorld::MoveBodyTo(uint64_t p_Id, ZActor* p_Actor, const coop::Transform& p_Xf, bool p_Hidden) {
@@ -3371,14 +3497,16 @@ void SdkWorld::MoveBodyTo(uint64_t p_Id, ZActor* p_Actor, const coop::Transform&
     s_Body.actor = p_Actor;
     s_Body.want = p_Xf;
     s_Body.stage = MovedBody::Settling;
-    s_Body.since = m_Now;
+    s_Body.since = s_Body.progressAt = m_Now;
     coop::Transform s_Was;
     ActorTransform(p_Actor, s_Was);
     s_Body.startOff = coop::Distance(s_Was.pos, p_Xf.pos);
+    s_Body.startPos = s_Was.pos;
 
-    // Moved there out of sight (a body sliding across the floor by itself is no sight to see),
-    // shown again once it lies there.
-    if (p_Hidden) {
+    // Moved out of sight only when nobody is near where it lies or where it goes (a body sliding
+    // across the floor by itself is no sight to see). Near a player it moves in plain view: hidden,
+    // it was a body that vanished in front of them (and stayed gone when the pull stalled).
+    if (p_Hidden && !SomeoneNear(s_Was.pos, 25.f) && !SomeoneNear(p_Xf.pos, 25.f)) {
         s_Body.hiddenMove = true;
         ZEntityRef s_Ref;
         p_Actor->GetID(s_Ref);
@@ -3414,7 +3542,7 @@ void SdkWorld::UpdateMovedBodies() {
     }
 
     std::vector<uint64_t> s_Done;
-    std::vector<std::pair<uint64_t, ZActor*>> s_Hide;
+    std::vector<std::pair<uint64_t, ZActor*>> s_Unseen;
 
     for (auto& [s_Id, s_Body] : m_MovedBodies) {
         ZActor* s_Actor = s_Body.actor;
@@ -3435,29 +3563,63 @@ void SdkWorld::UpdateMovedBodies() {
         }
 
         // The partner's stream stopped without a word: let go.
-        if (s_Body.stage == MovedBody::Held && m_Now - s_Body.lastHeld > 0.6) {
+        if (s_Body.stage == MovedBody::Held && m_Now - s_Body.lastHeld > 0.6)
+            LetGoBody(s_Id);
+
+        // A retry's wait over: pulled again.
+        if (s_Body.stage == MovedBody::Waiting && m_Now >= s_Body.since) {
             s_Body.stage = MovedBody::Settling;
-            s_Body.since = m_Now;
+            s_Body.since = s_Body.progressAt = m_Now;
+            s_Body.bestOff = 1e9f;
+            s_Body.hops = 0;
         }
 
         const float s_Off = PullBody(s_Body, s_Dt);
         const float s_Speed = std::sqrt(s_Body.vel.x * s_Body.vel.x + s_Body.vel.y * s_Body.vel.y);
 
+        if (s_Body.stage == MovedBody::Waiting)
+            continue;
+
+        // Getting nearer, or caught: well off, no nearer for a second and standing still (not just
+        // slow to get going: a body at rest takes a moment, and an early hop in game lifted one onto
+        // a table), a short hop (up to 2 a try) frees it from a step's edge, a railing, a chair's leg.
+        if (s_Off < s_Body.bestOff - 0.1f) {
+            s_Body.bestOff = s_Off;
+            s_Body.progressAt = m_Now;
+        }
+        else if (m_Now - s_Body.since > 1.5 && m_Now - s_Body.progressAt > 1.0 && s_Off > 0.8f && s_Speed < 0.15f && s_Body.hops < 2 &&
+            m_Now >= s_Body.hopUntil + 1.0) {
+            s_Body.hopUntil = m_Now + 0.12;
+            s_Body.progressAt = m_Now;
+            ++s_Body.hops;
+            ++m_BodyHops;
+
+            if (m_Trace) {
+                char s_Text[160];
+                std::snprintf(s_Text, sizeof(s_Text), "body: %s caught %.1f m off, hop %d", s_Actor->m_sActorName.c_str(), s_Off, s_Body.hops);
+                m_Trace(s_Text);
+            }
+        }
+
         if (s_Body.stage != MovedBody::Settling)
             continue;
 
+        // Time to get there: longer for a longer way (a long drag let go of far behind the stream).
         const double s_For = m_Now - s_Body.since;
+        const double s_Allowed = std::clamp(3.0 + 0.6 * s_Body.startOff, 3.0, 8.0);
         const bool s_There = s_Off < 0.35f && s_Speed < 0.4f;
+        coop::Transform s_Now;
+        const bool s_Level = ActorTransform(s_Actor, s_Now) && std::fabs(s_Now.pos.z - s_Body.want.pos.z) < 0.5f;
 
-        // There and still (or near enough when time is up): done.
-        if (s_There || (s_For > 3.0 && s_Off < 1.25f)) {
+        // There and still (or near enough, on the right floor, when time is up): done.
+        if (s_There || (s_For > s_Allowed && s_Off < 1.25f && s_Level)) {
             ++m_BodyMovesOk;
             AgreeBody(s_Id, s_Actor);
 
             if (m_Trace) {
-                char s_Text[200];
-                std::snprintf(s_Text, sizeof(s_Text), "body: %s lies where the partner left it (%.2f m off, pulled %.1f m)", s_Actor->m_sActorName.c_str(),
-                    s_Off, s_Body.startOff);
+                char s_Text[240];
+                std::snprintf(s_Text, sizeof(s_Text), "body: %s lies where the partner left it (%.2f m off, pulled %.1f m, moved %.1f m, %d hops, try %d)",
+                    s_Actor->m_sActorName.c_str(), s_Off, s_Body.startOff, coop::Distance(s_Now.pos, s_Body.startPos), s_Body.hops, s_Body.tries + 1);
                 m_Trace(s_Text);
             }
 
@@ -3465,41 +3627,72 @@ void SdkWorld::UpdateMovedBodies() {
             continue;
         }
 
-        // Stuck (caught on something, or this ragdoll won't move): hidden as before if it was to
-        // be moved out of sight (left where the partner took it from, it was found there).
-        if (s_For > 3.0) {
-            ++m_BodyMovesFailed;
+        if (s_For <= s_Allowed)
+            continue;
+
+        // Stalled: tried again a little later (it may have been caught on a door that opens, or
+        // under another body), twice. After that it stays where it is, in plain view: a body that
+        // vanished was worse than one a few metres off. Our AI doesn't see it then, so it raises no
+        // alarm the partner's game wouldn't.
+        if (s_Body.tries < 2) {
+            ++s_Body.tries;
+            ++m_BodyRetries;
+            s_Body.stage = MovedBody::Waiting;
+            s_Body.since = m_Now + 2.5;
 
             if (m_Trace) {
-                char s_Text[220];
-                std::snprintf(s_Text, sizeof(s_Text), "body: %s couldn't be pulled there (%.1f m off of %.1f)%s", s_Actor->m_sActorName.c_str(), s_Off,
-                    s_Body.startOff, s_Body.hiddenMove ? ": hidden instead" : "");
+                char s_Text[200];
+                std::snprintf(s_Text, sizeof(s_Text), "body: %s stalled %.1f m off, trying again in 2.5 s", s_Actor->m_sActorName.c_str(), s_Off);
                 m_Trace(s_Text);
             }
 
-            if (s_Body.hiddenMove)
-                s_Hide.emplace_back(s_Id, s_Actor);
-
-            s_Done.push_back(s_Id);
+            continue;
         }
+
+        ++m_BodyMovesFailed;
+
+        if (m_Trace) {
+            char s_Text[220];
+            std::snprintf(s_Text, sizeof(s_Text), "body: %s couldn't be pulled there (%.1f m off of %.1f): left in view, unseen to our AI",
+                s_Actor->m_sActorName.c_str(), s_Off, s_Body.startOff);
+            m_Trace(s_Text);
+        }
+
+        AgreeBody(s_Id, s_Actor);
+        s_Unseen.emplace_back(s_Id, s_Actor);
+        s_Done.push_back(s_Id);
     }
 
     for (const uint64_t s_Id : s_Done) {
         if (const auto s_It = m_MovedBodies.find(s_Id); s_It != m_MovedBodies.end()) {
-            const bool s_Hidden = std::any_of(s_Hide.begin(), s_Hide.end(), [&](const auto& p) { return p.first == s_Id; });
-
-            if (s_Hidden)
-                s_It->second.hiddenMove = false; // (stays out of sight)
-
             if (FindNpc(s_Id) != s_It->second.actor)
                 m_MovedBodies.erase(s_It);
             else
-                ForgetMovedBody(s_Id);
+                ForgetMovedBody(s_Id); // shown again if it was moved out of sight
         }
     }
 
-    for (const auto& [s_Id, s_Actor] : s_Hide)
-        HideBodyForPartner(s_Id, s_Actor, false);
+    for (const auto& [s_Id, s_Actor] : s_Unseen)
+        MakeBodyUnseen(s_Id, s_Actor);
+}
+
+void SdkWorld::MakeBodyUnseen(uint64_t p_Id, ZActor* p_Actor) {
+    auto& s_Body = m_Bodies[p_Id];
+    const auto s_Scene = Globals::Hitman5Module->m_pEntitySceneContext->m_pScene;
+
+    if (!p_Actor || !p_Actor->m_bEnabled || s_Body.unseen || !s_Scene)
+        return;
+
+    ZEntityRef s_Ref;
+    p_Actor->GetID(s_Ref);
+
+    if (ZEntityRef s_Unseen = SpawnQn(c_PartnerUnseenJson, "HitmanCoopBodyUnseen", s_Scene.m_entityRef, m_UnseenFactories)) {
+        if (s_Unseen.SetProperty("m_rActor", TEntityRef<ZActor>(s_Ref))) {
+            s_Unseen.GetEntity()->Activate(0);
+            m_BodyUnseen.push_back(s_Unseen);
+            s_Body.unseen = true;
+        }
+    }
 }
 
 void SdkWorld::HideBodyForPartner(uint64_t p_Id, ZActor* p_Actor, bool p_PutAway) {
@@ -3513,6 +3706,12 @@ void SdkWorld::HideBodyForPartner(uint64_t p_Id, ZActor* p_Actor, bool p_PutAway
     s_Ref.SetProperty("m_bVisible", false);
     s_Ref.SignalInputPin(ZString("Disable"));
 
+    // Not pulled anywhere any more (a pull's end shows it again: a body back out of the bin).
+    if (const auto s_It = m_MovedBodies.find(p_Id); s_It != m_MovedBodies.end()) {
+        s_It->second.hiddenMove = false;
+        m_MovedBodies.erase(s_It);
+    }
+
     AgreeBody(p_Id, p_Actor);
     auto& s_Body = m_Bodies[p_Id];
     s_Body.hidden = true;
@@ -3521,18 +3720,7 @@ void SdkWorld::HideBodyForPartner(uint64_t p_Id, ZActor* p_Actor, bool p_PutAway
     p_Actor->m_bUnk39 = true;
     p_Actor->m_bHasAIIcon = false;
     p_Actor->m_bBlockDisguisePickup = true;
-
-    const auto s_Scene = Globals::Hitman5Module->m_pEntitySceneContext->m_pScene;
-
-    if (p_Actor->m_bEnabled && !s_Body.unseen && s_Scene) {
-        if (ZEntityRef s_Unseen = SpawnQn(c_PartnerUnseenJson, "HitmanCoopBodyUnseen", s_Scene.m_entityRef, m_UnseenFactories)) {
-            if (s_Unseen.SetProperty("m_rActor", TEntityRef<ZActor>(s_Ref))) {
-                s_Unseen.GetEntity()->Activate(0);
-                m_BodyUnseen.push_back(s_Unseen);
-                s_Body.unseen = true;
-            }
-        }
-    }
+    MakeBodyUnseen(p_Id, p_Actor);
 
     if (m_Trace)
         m_Trace(std::string("body: ") + p_Actor->m_sActorName.c_str() + (p_PutAway ? " put away" : " moved") + " by the partner, hidden here" +
@@ -3540,9 +3728,9 @@ void SdkWorld::HideBodyForPartner(uint64_t p_Id, ZActor* p_Actor, bool p_PutAway
 }
 
 std::string SdkWorld::DescribeMovedBodies() const {
-    static constexpr const char* c_Stages[] = { "held", "settling" };
+    static constexpr const char* c_Stages[] = { "held", "settling", "waiting to retry" };
     std::string s_Out = std::to_string(m_MovedBodies.size()) + " being placed, " + std::to_string(m_BodyMovesOk) + " placed, " +
-        std::to_string(m_BodyMovesFailed) + " failed" + (m_BodiesStuck ? " (bodies can't be moved in this game build: hidden instead)" : "") +
+        std::to_string(m_BodyMovesFailed) + " failed, " + std::to_string(m_BodyHops) + " hops, " + std::to_string(m_BodyRetries) + " retries" + (m_BodiesStuck ? " (bodies can't be moved in this game build: hidden instead)" : "") +
         (!Functions::ZRagdollHandler_ApplyImpulseOnRagdoll->Exists() ? " (ragdoll push not found)" : "") + ", mode " + std::to_string(m_BodyMoveMode);
 
     for (const auto& [s_Id, s_Body] : m_MovedBodies) {
@@ -3565,6 +3753,16 @@ std::string SdkWorld::BodyMoveTest(const std::string& p_Arg) {
     if (p_Arg.rfind("mode ", 0) == 0) {
         SetBodyMoveMode(std::atoi(p_Arg.c_str() + 5));
         return "bodymove: mode " + std::to_string(m_BodyMoveMode);
+    }
+
+    if (p_Arg.rfind("lever ", 0) == 0) {
+        m_PullLever = std::clamp(static_cast<float>(std::atof(p_Arg.c_str() + 6)), -0.5f, 1.f);
+        return "bodymove: pushes " + std::to_string(m_PullLever) + " m above the root";
+    }
+
+    if (p_Arg.rfind("bones ", 0) == 0) {
+        m_PullBoneCount = static_cast<uint32_t>(std::clamp(std::atoi(p_Arg.c_str() + 6), 1, static_cast<int>(c_PullBones)));
+        return "bodymove: pushes on " + std::to_string(m_PullBoneCount) + " bones";
     }
 
     if (p_Arg.empty())

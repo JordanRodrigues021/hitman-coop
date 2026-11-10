@@ -27,6 +27,8 @@ target_include_directories(HitmanCoop PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/Src
 )
 
+coop_add_version_resource(HitmanCoop VFT_DLL "HITMAN Co-op mod for ZHMModSDK" "HitmanCoop" "HitmanCoop.dll")
+
 # Which ZHMModSDK (and so which game version) this build is for. The normal build is 4.2.1 (game
 # 3.290.1); separate builds for players who can't update use 4.1.1 (game 3.280.x) or 4.0.0-rc.1
 # (game 3.240.x), each with that SDK's dev package (-DZHMMODSDK_DEVPKG_DIR) and its own package.

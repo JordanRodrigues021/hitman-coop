@@ -44,6 +44,15 @@ bool String(const std::string& p_Json, const char* p_Key, std::string& p_Out) {
                     p_Out += static_cast<char>(0xC0 | (s_Code >> 6));
                     p_Out += static_cast<char>(0x80 | (s_Code & 0x3F));
                 }
+                // The rest of the first plane (a curly apostrophe in "O’Brien", Japanese names in
+                // Hokkaido): three bytes. They were dropped, and names came out with letters missing.
+                // Half of a surrogate pair can't be written alone: a replacement character.
+                else {
+                    const unsigned s_Char = s_Code >= 0xD800 && s_Code <= 0xDFFF ? 0xFFFD : s_Code;
+                    p_Out += static_cast<char>(0xE0 | (s_Char >> 12));
+                    p_Out += static_cast<char>(0x80 | ((s_Char >> 6) & 0x3F));
+                    p_Out += static_cast<char>(0x80 | (s_Char & 0x3F));
+                }
 
                 i += 5;
                 continue;

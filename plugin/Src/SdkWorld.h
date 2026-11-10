@@ -307,23 +307,46 @@ public:
         coop::Transform want;
         double since = 0.0;        // when this stage began
         double lastHeld = -100.0;  // the partner's stream last placed it (a drag)
-        enum Stage { Held, Settling } stage = Held;
-        bool hiddenMove = false;   // moved out of sight: shown once it lies there
+        enum Stage { Held, Settling, Waiting } stage = Held; // Waiting: a retry after a pull that stalled
+        bool hiddenMove = false;   // moved out of sight (no one near): shown once it lies there
         bool drag = false;
         coop::Vec3 prev {}, vel {};
         bool hasPrev = false;
         float startOff = 0.f;
+        coop::Vec3 startPos {}; // where it lay when the pull began (how far it really went)
+        // The partner's drag: where their body is heading (their stream's speed), so ours follows
+        // where it is going instead of trailing behind and being yanked.
+        coop::Vec3 wantPrev {}, wantVel {};
+        double wantAt = -1.0;
+        // Unsticking: the best it got to, when it last got nearer, hops tried.
+        float bestOff = 1e9f;
+        double progressAt = 0.0, hopUntil = -1.0;
+        int hops = 0, tries = 0;
     };
     std::unordered_map<uint64_t, MovedBody> m_MovedBodies;
     // Test: 0 as it should, 2 hidden as before (moved bodies hidden, drags not followed).
     int m_BodyMoveMode = 0;
     bool m_BodiesStuck = false;
-    uint32_t m_BodyMovesOk = 0, m_BodyMovesFailed = 0;
+    uint32_t m_BodyMovesOk = 0, m_BodyMovesFailed = 0, m_BodyHops = 0, m_BodyRetries = 0;
     double m_LastBodyPull = 0.0;
+    double m_NextUnitCheck = 0.0;
+    // Where on the body the pushes go (metres above its root) and on how many of its bones: tunable
+    // from the test channel ("bodymove lever 0.3", "bodymove bones 12").
+    float m_PullLever = 0.15f;
+    uint32_t m_PullBoneCount = 12;
     bool CanMoveBodies() const;
     float PullBody(MovedBody& p_Body, float p_Dt);
     void HoldBody(uint64_t p_Id, ZActor* p_Actor, const coop::Transform& p_Xf);
     void LetGoBody(uint64_t p_Id);
+    // Unseen to our AI (the switch the stand-in has): a body that lies elsewhere in the partner's
+    // game, or is put away there, raises no alarm here.
+    void MakeBodyUnseen(uint64_t p_Id, ZActor* p_Actor);
+    // The shared id of one of the level's NPCs (0 if it isn't one, or is the stand-in).
+    uint64_t NpcIdOf(ZActor* p_Actor) const;
+    // A hit (an SHitInfo) dealt by our own 47: its weapon owner, read through the game's type info.
+    bool HitByOurPlayer(const void* p_HitInfo) const;
+    // Our 47 or the partner's stand-in within p_Range of p_Pos (someone would see a body move).
+    bool SomeoneNear(const coop::Vec3& p_Pos, float p_Range) const;
     void MoveBodyTo(uint64_t p_Id, ZActor* p_Actor, const coop::Transform& p_Xf, bool p_Hidden = true);
     void UpdateMovedBodies();
     void ForgetMovedBody(uint64_t p_Id);

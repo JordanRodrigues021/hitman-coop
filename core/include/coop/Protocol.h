@@ -15,7 +15,7 @@ namespace coop {
 // 10: player status (alerts, menus, mission stats), mark kinds, what a loading partner loads.
 // 11: the host's mod version in Welcome, a player's colour and "away" in their status.
 // 16: NPC poses carry only the bones that changed (MsgNpcPose); item and body rest places.
-constexpr uint32_t kProtocolVersion = 16;
+constexpr uint32_t kProtocolVersion = 17;
 
 constexpr uint16_t kDefaultPort = 47047;
 constexpr size_t kMaxPacketSize = 1200;
@@ -56,6 +56,7 @@ enum class MsgType : uint8_t {
     NpcKnockedOut,
     PlayerState,
     NpcCheck,
+    NpcClaim,
     Count,
 };
 
@@ -147,6 +148,17 @@ struct MsgReject {
 struct MsgSceneInfo {
     uint32_t epoch = 0;
     SceneDesc scene;
+
+    void Write(ByteWriter& w) const;
+    bool Read(ByteReader& r);
+};
+
+// Client to host: our 47 hit (shot, threw something at, struck) an NPC the host's game runs. The
+// hit lands in our game, where the NPC was a puppet whose own AI was off: it ignored knock-outs. The
+// client runs it from that moment (it is un-puppeted at once), and the host hands it over.
+struct MsgNpcClaim {
+    uint32_t epoch = 0;
+    uint64_t id = 0;
 
     void Write(ByteWriter& w) const;
     bool Read(ByteReader& r);

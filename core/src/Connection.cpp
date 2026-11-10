@@ -83,7 +83,9 @@ void Connection::Flush(double p_Now, std::vector<std::vector<uint8_t>>& p_Out) {
         if (static_cast<uint16_t>(s_Pending.id - s_WindowStart) >= kReliableWindow)
             break;
 
-        if (s_Pending.lastSent >= 0.0 && p_Now - s_Pending.lastSent < s_Resend)
+        // Backed off per message: on a link that drops a lot, a message resent every round trip
+        // only added to the load that made it drop.
+        if (s_Pending.lastSent >= 0.0 && p_Now - s_Pending.lastSent < std::min(1.0, s_Resend * (1u << std::min<uint8_t>(s_Pending.sends > 0 ? s_Pending.sends - 1 : 0, 4))))
             continue;
 
         if (!s_Push({ s_Pending.type, true, s_Pending.id, &s_Pending.payload })) {
@@ -95,6 +97,7 @@ void Connection::Flush(double p_Now, std::vector<std::vector<uint8_t>>& p_Out) {
             ++m_Stats.resends;
 
         s_Pending.lastSent = p_Now;
+        s_Pending.sends = static_cast<uint8_t>(std::min(255, s_Pending.sends + 1));
     }
 
     // A burst bigger than one flush (a crowded mission's NPC positions, poses and the sync check in
@@ -334,6 +337,9 @@ void Connection::ProcessAcks(uint16_t p_Ack, uint32_t p_AckBits, double p_Now) {
 void Connection::OnPacketAcked(SentPacket& p_Packet, double p_Now) {
     p_Packet.acked = true;
 
+    // Every acked packet times the round trip, also those acked only in the bits (up to a send
+    // interval late): playback's delay is tuned on this estimate, and timing only the newest acks
+    // (tried in 0.13.95) let NPCs drift past the chaos test's limit.
     const double s_Sample = p_Now - p_Packet.sendTime;
 
     if (m_SmoothedRtt >= 0.0)

@@ -33,6 +33,8 @@
 #include <Glacier/ZGameLoopManager.h>
 #include <Glacier/ZScene.h>
 
+#include "OnlineWatch.h"
+
 #ifndef COOP_DEFAULT_RELAY
 #define COOP_DEFAULT_RELAY ""
 #endif
@@ -159,6 +161,16 @@ void HitmanCoop::SaveBugReport(const std::string& p_Diagnostics) {
     {
         std::ifstream s_In(s_Mods + "HitmanCoop.ini");
         std::ofstream s_Out(s_Folder / "HitmanCoop.ini");
+        std::string s_Line;
+
+        while (std::getline(s_In, s_Line))
+            s_Out << CoopLog::MaskAddresses(s_Line) << '\n';
+    }
+
+    // What the setup did (Retail\HitmanCoop-install.log): install trouble (an antivirus taking the
+    // mod loader, the wrong build) shows there, not in the mod's own log.
+    if (std::ifstream s_In(fs::path(s_Mods).parent_path().parent_path() / "HitmanCoop-install.log"); s_In) {
+        std::ofstream s_Out(s_Folder / "HitmanCoop-install.log");
         std::string s_Line;
 
         while (std::getline(s_In, s_Line))
@@ -539,6 +551,7 @@ void HitmanCoop::LoadSettings() {
     m_ShowMarks = GetSettingBool("general", "show_marks", true);
     m_PauseTogether = GetSettingBool("general", "pause_together", true);
     m_AutoReconnect = GetSettingBool("general", "auto_reconnect", true);
+    m_HidePartnerKills = GetSettingBool("online", "hide_partner_kills_from_game", false);
     m_ShowRadar = GetSettingBool("general", "show_radar", true);
     m_Sounds = GetSettingBool("general", "sounds", true);
     m_Hotkeys = GetSettingBool("general", "hotkeys", true);
@@ -918,6 +931,15 @@ bool HitmanCoop::OnTeamEvent(const std::string& p_Name, const std::string& p_Jso
         m_World.Pulse();
         m_World.NotifyAs(SdkWorld::ToastKind::Partner, s_Partner + " asks you to come to them: follow the arrow, or press " +
             (s_RegroupKey.empty() ? std::string("Regroup in CO-OP") : s_RegroupKey) + " to regroup.");
+        return true;
+    }
+
+    if (p_Name == "Coop_Account") {
+        if (const std::string s_Warning = OnlineWatch::CheckPartnerAccount(p_Json, s_Partner); !s_Warning.empty()) {
+            AppendLog("online: " + s_Warning);
+            m_World.NotifyAs(SdkWorld::ToastKind::Warning, s_Warning);
+        }
+
         return true;
     }
 
@@ -1376,6 +1398,12 @@ void HitmanCoop::ProcessCommands(double p_Now) {
             }
             else if (coop::ResolveEndpoint(s_Command.address, coop::kDefaultPort, s_Host, s_Error)) {
                 s_Socket = coop::UdpSocket::Open(0, s_Error);
+
+                // A Tailscale address (100.64.0.0/10) with Tailscale off here: it can only time out.
+                // Said now, instead of a "no answer" ten seconds later.
+                if (s_Socket && (s_Host.ip & 0xFFC00000u) == 0x64400000u && coop::LocalTailscaleAddress().empty())
+                    m_World.NotifyAs(SdkWorld::ToastKind::Warning, "That's a Tailscale address, but Tailscale isn't connected on this PC. Start Tailscale "
+                        "(or run the HITMAN Co-op setup, \"Set up Tailscale only\"), then join again.");
             }
 
             if (!s_Socket) {
@@ -1416,6 +1444,9 @@ void HitmanCoop::OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent) {
         if (!m_PreviousCrash.empty())
             m_World.NotifyAs(SdkWorld::ToastKind::Warning, "The game closed with an error last time. If co-op was running, "
                 "please send " + m_PreviousCrash + " to the mod's author.");
+
+        // Steam and IOI's servers, watched from here on (the game has both up by now).
+        OnlineWatch::Start();
 
         // The files the last update replaced, and what's new in it if this is its first start.
         const std::string s_Game = GameFolder();
@@ -1504,11 +1535,14 @@ void HitmanCoop::OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent) {
         s_Config.npcScanRate = m_SlowMode ? 15.0 : 30.0;
 
         // How much NPC detail goes to the partner (Settings): less for a slow connection, more for a LAN.
+        // (These overrode Session's own defaults every frame: 0.13.94's "32 NPCs within 50 m" against
+        // moonwalking never reached a game, which kept posing 10 within 35 m. Normal is that now; the
+        // most is what PoseHook has room for, 40.)
         static constexpr struct {
             double npc, pose;
             size_t poses;
             float range;
-        } c_Quality[] = { { 1.0 / 10.0, 1.0 / 8.0, 5, 25.f }, { 1.0 / 15.0, 1.0 / 12.0, 10, 35.f }, { 1.0 / 20.0, 1.0 / 15.0, 14, 45.f } };
+        } c_Quality[] = { { 1.0 / 10.0, 1.0 / 8.0, 16, 35.f }, { 1.0 / 15.0, 1.0 / 12.0, 32, 50.f }, { 1.0 / 20.0, 1.0 / 15.0, 40, 60.f } };
         const auto& s_Quality = c_Quality[std::clamp(m_SyncQualitySetting.load(), 0, 2)];
         s_Config.npcInterval = s_Quality.npc;
         s_Config.npcPoseInterval = s_Quality.pose;
@@ -1554,6 +1588,30 @@ void HitmanCoop::OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent) {
     UpdateReconnect(s_Now);
     m_World.UpdateMarks();
 
+    // The game's own online connections (Steam, IOI's servers): drops logged, and told during co-op.
+    const bool s_Connected = m_FrameStatus.state == coop::SessionState::Connected;
+    OnlineWatch::Update(s_Now, s_Connected, [this](const std::string& p_Line) { AppendLog(p_Line); },
+        [this](const std::string& p_Text) { m_World.NotifyAs(SdkWorld::ToastKind::Warning, p_Text); });
+
+    // Which Steam account this PC uses (a salted hash), once a connection: the partner's mod warns
+    // both if it is the same one (Steam signs one of two PCs on one account out, at random times).
+    if (!s_Connected)
+        m_AccountSent = false;
+    else if (!m_AccountSent && m_Session) {
+        if (const std::string s_Account = OnlineWatch::AccountMessage(); !s_Account.empty()) {
+            m_Session->SendMissionEvent("Coop_Account", s_Account);
+            m_AccountSent = true;
+        }
+    }
+
+    // Tailscale started (or stopped) after the game: its address in the CO-OP menu follows.
+    if ((!m_Session || !m_Session->Active()) && s_Now >= m_NextTailscaleCheck) {
+        m_NextTailscaleCheck = s_Now + 15.0;
+        const std::string s_Tailscale = coop::LocalTailscaleAddress();
+        std::lock_guard s_StatusLock(m_StatusMutex);
+        m_TailscaleAddress = s_Tailscale;
+    }
+
     // Only the partner's map, notebook or phone (not their pause menu): ours goes on, if asked.
     {
         const int s_Menu = m_FrameStatus.peerStateKnown ? m_FrameStatus.peerState.menu - 1 : -1;
@@ -1593,6 +1651,9 @@ void HitmanCoop::OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent) {
 
     if (m_CodeCopied.exchange(false))
         m_World.Notify("Join code copied: paste it to your friend.");
+
+    if (m_TailscaleCopied.exchange(false))
+        m_World.Notify("Your Tailscale address is copied: send it to your partner, they JOIN with it.");
 
     // What the partner holds, in the stand-in's hands (told on a change: the test channel's own stays).
     {
@@ -1830,6 +1891,14 @@ void HitmanCoop::RunTestChannel(double p_Now) {
         else if (s_Verb == "bodyprobe")
             m_Test.Trace(m_World.BodyProbeStart(s_Arg));
         // pausescreen: the partner's pause screen for 6 s, as it looks (no pause).
+        else if (s_Verb == "verifysig") {
+            // Test: "verifysig <file>": is <file>.sig its signature by the update key?
+            std::ifstream s_File(s_Arg, std::ios::binary), s_Sig(s_Arg + ".sig", std::ios::binary);
+            const std::string s_Text((std::istreambuf_iterator<char>(s_File)), {}), s_SigText((std::istreambuf_iterator<char>(s_Sig)), {});
+            m_Test.Trace(std::string("verifysig: ") + (Updater::VerifySignature(s_Text, s_SigText) ? "signed" : "NOT signed"));
+        }
+        else if (s_Verb == "online")
+            m_Test.Trace("online: " + OnlineWatch::Describe() + " | account " + (OnlineWatch::AccountMessage().empty() ? "unknown" : "known"));
         else if (s_Verb == "pausescreen") {
             m_PausePreviewUntil = Now() + 6.0;
             m_Test.Trace("pausescreen: shown for 6 s");
@@ -2225,6 +2294,17 @@ DEFINE_PLUGIN_DETOUR(HitmanCoop, bool, OnActorHit, IBaseCharacter* th, const SHi
         return HookResult<bool>(HookAction::Return(), false);
     }
 
+    // Our 47's hit (a shot, a thrown item, a blow) on an NPC the partner's game runs: here it was a
+    // puppet with its AI off, and a knock-out did nothing (seen in tests: an NPC that ignored both a
+    // knock-out and a kill). Ours to run from this moment, before the game decides the reaction.
+    if (m_World.HitByOurPlayer(&p_HitInfo)) {
+        std::lock_guard s_Lock(m_SessionMutex);
+
+        if (m_Session && m_FrameStatus.synced)
+            if (const uint64_t s_Id = m_World.NpcIdOf(static_cast<ZActor*>(th)); s_Id != 0)
+                m_Session->ClaimNpc(s_Id, Now());
+    }
+
     return HookResult<bool>(HookAction::Continue());
 }
 
@@ -2276,6 +2356,10 @@ DEFINE_PLUGIN_DETOUR(
 
         // An NPC we killed only to match the partner's game: theirs scores it, ours must not.
         // Its kill, and witnesses or finds of its body: those were the partner's, in their game.
+        // Not counted in our tally or told to the partner, but the game itself gets the event: it
+        // numbers its online events (p_EventIndex) and syncs them with IOI's servers, and events
+        // held back from it are the first suspect for the "signed in on another computer" errors
+        // players got since 0.13. [online] hide_partner_kills_from_game = true is the old way.
         static const std::unordered_set<std::string> c_PartnerKillEvents = {
             "Kill", "NoticedKill", "MurderedBodySeen", "DeadBodySeen", "BodyFound", "AccidentBodyFound", "Witnesses", "Pacify",
             "Noticed_Pacified"
@@ -2289,8 +2373,13 @@ DEFINE_PLUGIN_DETOUR(
                 m_World.AddPartnerKillKey(s_At == std::string::npos ? std::string() : s_Json.substr(s_Start, s_Json.find('"', s_Start) - s_Start), s_Json);
             }
 
-            m_Test.Trace("event: " + s_Name + " of a partner's victim, dropped");
-            return HookResult<void>(HookAction::Return());
+            if (m_HidePartnerKills) {
+                m_Test.Trace("event: " + s_Name + " of a partner's victim, dropped");
+                return HookResult<void>(HookAction::Return());
+            }
+
+            m_Test.Trace("event: " + s_Name + " of a partner's victim, not counted (the game still gets it)");
+            return HookResult<void>(HookAction::Continue());
         }
 
         if (s_Name == "Pacify" || s_Name == "Kill")
@@ -2329,7 +2418,7 @@ DEFINE_PLUGIN_DETOUR(
         }
 
         if (s_Name.find("Kill") != std::string::npos || s_Name.find("Pacif") != std::string::npos)
-            m_Test.Trace("event: " + s_Name + (s_Name == "Pacify" ? " " + s_Json.substr(std::min<size_t>(s_Json.size(), 200)) : std::string()));
+            m_Test.Trace("event: " + s_Name + (s_Name == "Pacify" ? " " + s_Json.substr(0, std::min<size_t>(s_Json.size(), 200)) : std::string()));
         else
             m_Test.Trace("event: " + s_Name + " " + s_Json.substr(0, std::min<size_t>(s_Json.size(), 1500)));
 

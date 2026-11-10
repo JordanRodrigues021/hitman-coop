@@ -269,7 +269,7 @@ function Install-Mod([string]$Game) {
     $script:Payload = Select-Payload $Info.Version
 
     if (-not (Test-Path (Join-Path $Payload "mods\$ModName.dll"))) {
-        throw "The installer's 'files' folder is missing. Extract the whole zip before running Install.bat."
+        throw "The installer's 'files' folder is missing. Extract the whole zip before running the installer."
     }
 
     $Build = if ($Payload -like "*files-3.280") { "3.280" } else { "3.290" }
@@ -292,6 +292,21 @@ function Install-Mod([string]$Game) {
     $Backup = Join-Path $Retail "HitmanCoop-backup\$Stamp"
     $Added = @()
     $Replaced = @()
+    $Hashes = [ordered]@{}
+
+    # What an earlier install of ours put here (the setup's and this script's manifests): replaced
+    # without a backup. Backing those up made the uninstall after an update put the old version's
+    # mod loader back instead of the player's own.
+    $ManifestPath = Join-Path $Retail $ManifestName
+    $Previous = $null
+    if (Test-Path $ManifestPath) { try { $Previous = Get-Content $ManifestPath -Raw | ConvertFrom-Json } catch {} }
+    function Test-Ours([string]$Rel) {
+        if (-not $Previous) { return $false }
+        if (@($Previous.added) -contains $Rel) { return $true }
+        if ($Previous.files -and ($Previous.files.PSObject.Properties.Name -contains $Rel)) { return $true }
+        foreach ($Dir in @($Previous.backups | Where-Object { $_ })) { if (Test-Path (Join-Path (Join-Path $Retail $Dir) $Rel)) { return $true } }
+        return $false
+    }
 
     foreach ($File in Get-ChildItem $Payload -Recurse -File) {
         $Relative = $File.FullName.Substring($Payload.Length + 1)
@@ -299,17 +314,21 @@ function Install-Mod([string]$Game) {
 
         New-Item -ItemType Directory -Force (Split-Path $Dest -Parent) | Out-Null
 
+        $Hashes[$Relative] = (Get-FileHash $File.FullName).Hash.ToLowerInvariant()
+
         # Already our file from an earlier install: nothing to back up.
         if ((Test-Path $Dest) -and (Get-FileHash $Dest).Hash -eq (Get-FileHash $File.FullName).Hash) {
             continue
         }
 
-        if (Test-Path $Dest) {
+        if ((Test-Path $Dest) -and (Test-Ours $Relative)) {
+            # One of ours, an older version: just replaced.
+        } elseif (Test-Path $Dest) {
             $BackupFile = Join-Path $Backup $Relative
             New-Item -ItemType Directory -Force (Split-Path $BackupFile -Parent) | Out-Null
             Copy-Item $Dest $BackupFile -Force
             $Replaced += $Relative
-        } else {
+        } elseif (-not (Test-Ours $Relative)) {
             $Added += $Relative
         }
 
@@ -330,15 +349,14 @@ function Install-Mod([string]$Game) {
         throw "Couldn't turn the mod on in Retail\mods.ini."
     }
 
-    # Remember what we did, so uninstall can put things back.
-    $ManifestPath = Join-Path $Retail $ManifestName
-    $Previous = $null
-    if (Test-Path $ManifestPath) { $Previous = Get-Content $ManifestPath -Raw | ConvertFrom-Json }
-
+    # Remember what we did, so uninstall can put things back (the same file the setup writes).
     $Manifest = [ordered]@{
         installed = $Stamp
-        added     = @($Added + @(if ($Previous) { $Previous.added }) | Select-Object -Unique)
-        backups   = @(@(if ($Previous) { $Previous.backups }) + @(if ($Replaced.Count) { "HitmanCoop-backup\$Stamp" }))
+        version   = (Split-Path -Leaf $PSScriptRoot) -replace '^HitmanCoop-', ''
+        build     = $Build
+        added     = @($Added + @(if ($Previous) { $Previous.added }) | Where-Object { $_ } | Select-Object -Unique)
+        backups   = @(@(if ($Previous) { $Previous.backups }) + @(if ($Replaced.Count) { "HitmanCoop-backup\$Stamp" }) | Where-Object { $_ })
+        files     = $Hashes
     }
 
     $Manifest | ConvertTo-Json | Set-Content -Path $ManifestPath -Encoding utf8
@@ -396,7 +414,8 @@ function Uninstall-Mod([string]$Game) {
             }
         }
 
-        # ...and files we replaced get their oldest backup back.
+        # ...and files we replaced get their backups back, oldest first, so the newest of the
+        # player's own files wins (only their files are ever backed up).
         foreach ($BackupDir in @($Manifest.backups | Where-Object { $_ }) | Sort-Object) {
             $Source = Join-Path $Retail $BackupDir
             if (-not (Test-Path $Source)) { continue }
@@ -405,8 +424,6 @@ function Uninstall-Mod([string]$Game) {
                 $Relative = $File.FullName.Substring($Source.Length + 1)
                 Copy-Item $File.FullName (Join-Path $Retail $Relative) -Force
             }
-
-            break
         }
 
         Remove-Item $ManifestPath -Force
@@ -415,6 +432,11 @@ function Uninstall-Mod([string]$Game) {
     }
 
     Remove-Item (Join-Path $Retail "HitmanCoop-install.log") -Force -ErrorAction SilentlyContinue
+    # What the mod wrote while it ran (its settings, HitmanCoop.ini, stay for next time).
+    foreach ($Name in "HitmanCoop.log", "HitmanCoop-previous.log", "HitmanCoop-crash.txt", "HitmanCoop-crash-previous.txt", "HitmanCoop-whatsnew.txt") {
+        Remove-Item (Join-Path $Retail "mods\$Name") -Force -ErrorAction SilentlyContinue
+    }
+    Get-ChildItem $Retail -Recurse -Filter *.hcold -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
     $ModsDir = Join-Path $Retail "mods"
     if ((Test-Path $ModsDir) -and -not (Get-ChildItem $ModsDir -Force -ErrorAction SilentlyContinue)) { Remove-Item $ModsDir -Force }
     Say "Removed HITMAN Co-op from $Game"

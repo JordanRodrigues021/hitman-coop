@@ -16,6 +16,7 @@
 #include <sstream>
 
 #include "IconsMaterialDesign.h"
+#include "OnlineWatch.h"
 
 namespace {
     const ImVec4 c_Red(0.86f, 0.08f, 0.14f, 1.f);
@@ -1024,8 +1025,26 @@ void HitmanCoop::DrawPlayTab(const coop::SessionStatus& p_Status, bool p_InMissi
             if (!m_LanAddress.empty())
                 ImGui::TextDisabled("This PC on your network: %s", Hide(m_LanAddress).c_str());
 
-            if (!m_TailscaleAddress.empty())
-                ImGui::TextDisabled("Tailscale: %s", Hide(m_TailscaleAddress).c_str());
+            // (Refreshed on the game's thread every 15 s: copied under the lock.)
+            std::string s_Tailscale;
+            {
+                std::lock_guard s_Lock(m_StatusMutex);
+                s_Tailscale = m_TailscaleAddress;
+            }
+
+            if (!s_Tailscale.empty()) {
+                ImGui::TextDisabled("Tailscale: %s", Hide(s_Tailscale).c_str());
+                ImGui::SameLine();
+
+                // (The world's toasts belong to the game's thread: the copy is told there, as the join code's is.)
+                if (ImGui::SmallButton(ICON_MD_CONTENT_COPY "##HitmanCoopCopyTailscale")) {
+                    ImGui::SetClipboardText(s_Tailscale.c_str());
+                    m_TailscaleCopied = true;
+                }
+
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Copy your Tailscale address for your partner");
+            }
 
             ImGui::Spacing();
 
@@ -1744,6 +1763,11 @@ std::string HitmanCoop::Diagnostics(const coop::SessionStatus& p_Status) {
     s_Out << "HITMAN Co-op " << c_ModVersion << " (protocol " << coop::kProtocolVersion << "), game " << m_GameVersion << ", build for game " << c_GameTarget << ".x\n";
     s_Out << "Game patches: " << CrashGuards::Report() << "\n";
     s_Out << "Pause control: " << (GamePause::Available() ? "found" : "not found") << "\n";
+    s_Out << "Online: " << OnlineWatch::Describe() << "\n";
+    {
+        std::lock_guard s_Lock(m_StatusMutex);
+        s_Out << "Tailscale: " << (m_TailscaleAddress.empty() ? "not connected" : "connected") << "\n";
+    }
     s_Out << "Session: " << coop::SessionStateName(p_Status.state) << (p_Status.role == coop::SessionRole::Host ? " (host)" :
         p_Status.role == coop::SessionRole::Client ? " (client)" : "") << ", synced " << (p_Status.synced ? "yes" : "no") << "\n";
     s_Out << "Partner: mod " << p_Status.peerModVersion << ", game " << p_Status.peerGameVersion << "\n";

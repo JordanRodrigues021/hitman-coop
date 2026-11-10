@@ -143,6 +143,16 @@ class Game:
         if not re.search(r"^\s*\[HitmanCoop\]\s*$", text, re.I | re.M):
             with open(ini, "a", encoding="utf-8") as f:
                 f.write(("" if text.endswith("\n") or not text else "\n") + "[HitmanCoop]\n")
+        # The mod loader's first-start "send crash reports?" box sat over the game's pause menu: the
+        # game stayed paused, its AI never ran, and knock-outs and kills did nothing (the "body"
+        # failures in some runs). Answered here, as the setup does.
+        text = open(ini, encoding="utf-8", errors="replace").read()
+        if not re.search(r"^\s*crash_reporting\s*=", text, re.I | re.M):
+            if re.search(r"^\s*\[sdk\]\s*$", text, re.I | re.M):
+                text = re.sub(r"^(\s*\[sdk\]\s*)$", r"\1\ncrash_reporting = false", text, count=1, flags=re.I | re.M)
+            else:
+                text = "[sdk]\ncrash_reporting = false\n" + text
+            open(ini, "w", encoding="utf-8").write(text)
         self.set_ini({("general", "test_control"): self.cmd, ("log", "level"): log_level})
         return version, os.path.basename(payload)
 
@@ -384,6 +394,17 @@ def scenario_smoke(g, r, ctx):
     r.check("log lines carry date, game time, level and category", re.match(r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} +[+-]\d+\.\d\d  (INFO|WARN|ERROR|DEBUG|TRACE) ", log[0] if log else "") is not None,
             log[0][:120] if log else "(no log)")
     r.check("the log is at debug level for testing", s.get("log", {}).get("level") == "DEBUG", s.get("log"))
+
+    # 0.13.95: the watch on Steam and IOI's servers, and the update signature check, in the game.
+    s0 = len(g.log())
+    g.command("online")
+    line = g.wait_log(r"online *\| IOI servers:", 6, s0)
+    r.check("the online watch reads the game's online state and Steam", line is not None and "Steam:" in line, (line or "")[-200:])
+    upd = os.path.join(ROOT, "_dist", f"update-{ctx['version']}", "update.txt")
+    if os.path.exists(upd) and os.path.exists(upd + ".sig"):
+        g.command("verifysig " + upd)
+        # (The log's category column is 8 wide: "verifysi".)
+        r.check("the mod accepts its signed update.txt", g.wait_log(r"verifysi\w* *\| signed", 6, s0) is not None)
     g.shot("title")
 
 
@@ -526,23 +547,26 @@ def scenario_bodies(g, r, ctx):
     g.shot("body-before")
     done_rx = r"body +\| .* (lies where the partner left it|couldn't be pulled)"
 
-    def moved(what, command, shot_after=None, wait=12):
+    def moved(what, command, shot_after=None, wait=12, at_least=1.0):
         s0 = len(g.log())
         g.command(command)
         if shot_after:
             time.sleep(shot_after)
             g.shot(what + "-moving")
         done = g.wait_log(done_rx, wait, s0)
-        off = numbers(done, r"\(([\d.]+) m off, pulled ([\d.]+) m\)")
-        r.metrics[what + ": m off, m pulled"] = off
-        r.check(f"{what}: it really moved (over 1 m) and lies where it was put (under 0.6 m off)",
-                done is not None and "lies where" in done and off and off[1] > 1.0 and off[0] < 0.6, done)
+        # (0.13.95: "(0.26 m off, pulled 2.6 m, moved 2.4 m, 0 hops, try 1)": how far it really went.)
+        off = numbers(done, r"\(([\d.]+) m off, pulled [\d.]+ m, moved ([\d.]+) m")
+        r.metrics[what + ": m off, m moved"] = off
+        r.check(f"{what}: it really moved (over {at_least:g} m) and lies where it was put (under 0.6 m off)",
+                done is not None and "lies where" in done and off and off[1] > at_least and off[0] < 0.6, done)
         g.shot(what + "-done")
         return s0
 
     moved("moved out of sight (the partner's word)", "bodymove here")
     moved("pulled in sight", "bodymove pull", shot_after=0.8)
-    s0 = moved("dragged (the partner's stream)", "bodymove drag", shot_after=1.5, wait=15)
+    # (The drag's target is a fixed spot ahead of our 47: how far that is from where the body lies
+    # depends on where it fell, under a metre this layout.)
+    s0 = moved("dragged (the partner's stream)", "bodymove drag", shot_after=1.5, wait=15, at_least=0.5)
     r.check("dragged, it is pulled along", g.wait_log(r"pulled along with their drag", 2, s0) is not None)
     g.command("bodymove")
     r.note(g.wait_log(r"bodymove *\| \d+ being placed", 5, s0) or "(no bodymove summary)")
@@ -729,6 +753,43 @@ def scenario_installers(r, ctx):
         after = {os.path.relpath(os.path.join(d, n), retail): sha(os.path.join(d, n)) for d, _, fs in os.walk(retail) for n in fs if not n.startswith("HitmanCoop-install")}
         r.check(f"installers: Windows, game {version}: uninstall puts it back as it was", out.returncode == 0 and after == before,
                 sorted(set(after.items()) ^ set(before.items()))[:4])
+
+    # The setup (no PowerShell): install, an update over an older install (the backups must stay the
+    # player's own files, not our older ones), uninstall back to the original folder.
+    setup = os.path.join(ctx["stage"], "HitmanCoop-Setup.exe")
+    if not os.path.exists(setup):
+        r.note("installers: no HitmanCoop-Setup.exe in the stage")
+    else:
+        for version, folder in (("3.290.1", "files"), ("3.280.0", "files-3.280")):
+            game = os.path.join(root, "setup-" + version, "HITMAN 3")
+            retail = fake_game(game, version, os.path.join(stage, "files", "ZHMModSDK.dll"))
+            os.makedirs(os.path.join(retail, "mods"), exist_ok=True)
+            open(os.path.join(retail, "ZHMModSDK.dll"), "wb").write(b"their loader")
+            open(os.path.join(retail, "mods", "Other.dll"), "wb").write(b"their mod")
+            open(os.path.join(retail, "mods.ini"), "w").write("[sdk]\n[Other]\n")
+            before = {os.path.relpath(os.path.join(d, n), retail): sha(os.path.join(d, n)) for d, _, fs in os.walk(retail) for n in fs}
+            log = os.path.join(root, "setup-" + version + ".log")
+
+            def run(*extra):
+                return subprocess.run([setup, "--silent", "--game", game, "--log", log, *extra], capture_output=True, text=True, timeout=180)
+
+            out = run()
+            said = open(log, encoding="utf-8", errors="replace").read().strip().splitlines()[-1:] if os.path.exists(log) else []
+            r.check(f"installers: setup, game {version}: the {folder} build goes in", out.returncode == 0 and
+                    sha(os.path.join(retail, "ZHMModSDK.dll")) == sha(os.path.join(stage, folder, "ZHMModSDK.dll")) and
+                    sha(os.path.join(retail, "mods", "HitmanCoop.dll")) == sha(os.path.join(stage, folder, "mods", "HitmanCoop.dll")), said)
+            # An "older version" of ours in place, then the update over it: the backup must still hold
+            # their loader only.
+            open(os.path.join(retail, "mods", "HitmanCoop.dll"), "wb").write(b"our older version")
+            open(os.path.join(retail, "ZHMModSDK.dll"), "wb").write(b"our older loader")
+            out2 = run()
+            backups = [os.path.join(d, n) for d, _, fs in os.walk(os.path.join(retail, "HitmanCoop-backup")) for n in fs]
+            r.check(f"installers: setup, game {version}: an update backs up nothing of ours", out2.returncode == 0 and
+                    all(open(b, "rb").read() in (b"their loader",) for b in backups) and len(backups) == 1, [os.path.relpath(b, retail) for b in backups])
+            out3 = run("--uninstall", "--remove-settings")
+            after = {os.path.relpath(os.path.join(d, n), retail): sha(os.path.join(d, n)) for d, _, fs in os.walk(retail) for n in fs if not n.startswith("HitmanCoop-install")}
+            r.check(f"installers: setup, game {version}: uninstall puts it back as it was", out3.returncode == 0 and after == before,
+                    sorted(set(after.items()) ^ set(before.items()))[:4])
 
     wsl = shutil.which("wsl.exe") or shutil.which("wsl")
     if not wsl:

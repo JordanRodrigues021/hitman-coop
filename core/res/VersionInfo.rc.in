@@ -1,0 +1,35 @@
+// Windows version resource (the Details tab of the file's Properties). A file without one is one
+// of the things antivirus heuristics count against an unsigned program.
+#include <winver.h>
+#include "Version.h"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION COOP_VERSION_MAJOR, COOP_VERSION_MINOR, COOP_VERSION_PATCH, 0
+ PRODUCTVERSION COOP_VERSION_MAJOR, COOP_VERSION_MINOR, COOP_VERSION_PATCH, 0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE @COOP_RC_FILETYPE@
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "Jordan Rodrigues"
+            VALUE "FileDescription", "@COOP_RC_DESCRIPTION@"
+            VALUE "FileVersion", COOP_VERSION_TEXT
+            VALUE "InternalName", "@COOP_RC_NAME@"
+            VALUE "LegalCopyright", "Copyright (C) 2026 Jordan Rodrigues. GPL-3.0-or-later."
+            VALUE "LegalTrademarks", "HITMAN is a trademark of IO Interactive A/S. HITMAN Co-op is a fan project, not made or endorsed by IOI."
+            VALUE "OriginalFilename", "@COOP_RC_FILE@"
+            VALUE "ProductName", "HITMAN Co-op"
+            VALUE "ProductVersion", COOP_VERSION_TEXT
+            VALUE "Comments", "Two-player co-op for HITMAN World of Assassination. https://github.com/JordanRodrigues021/hitman-coop"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

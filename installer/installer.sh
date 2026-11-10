@@ -632,6 +632,27 @@ maybe_add_firewall() {
 # Install / uninstall
 # ---------------------------------------------------------------------------
 
+# Tailscale (a private network between the two players' PCs, the most reliable way to play by IP):
+# its address if it is here, or how to get it. Join codes need none of this.
+tailscale_hint() {
+    local address
+    if command -v tailscale >/dev/null 2>&1; then
+        address=$(tailscale ip -4 2>/dev/null | head -n 1 || true)
+        if [[ -n $address ]]; then
+            Say "Tailscale is on: your address is $address. When you host, your partner JOINs with it."
+        else
+            Say "Tailscale is installed but not signed in: run 'sudo tailscale up' and sign in, then your partner can JOIN with your 'tailscale ip -4'."
+        fi
+        if tailscale status --json 2>/dev/null | grep -q '"ExitNode": *true'; then
+            Say "Note: a Tailscale exit node is on. All your traffic (Steam's too) goes through it, and Steam may sign you out. Turn it off while you play."
+        fi
+    elif [[ -e /home/deck || $(cat /etc/os-release 2>/dev/null) == *SteamOS* ]]; then
+        Say "Optional: Tailscale gives you and your partner a direct, private connection. On a Steam Deck, install it in Desktop Mode (see https://tailscale.com/kb/1031/install-linux); join codes work without it."
+    else
+        Say "Optional: Tailscale gives you and your partner a direct, private connection: https://tailscale.com/download/linux (then 'sudo tailscale up'). Join codes work without it."
+    fi
+}
+
 install_mod() {
     local game=$1 retail theirs ours theirs_version ours_version
     local stamp backup backup_rel file rel dest actual_rel
@@ -700,6 +721,42 @@ install_mod() {
     fi
     backup_rel="HitmanCoop-backup/$(basename -- "$backup")"
 
+    # What an earlier install of ours put here (any installer's manifest): replaced without a backup.
+    # Backing those up made the uninstall after an update bring back the old version's mod loader
+    # instead of the player's own.
+    declare -A ours=()
+    if [[ -f $retail/$MANIFEST_NAME ]]; then
+        while IFS= read -r -d '' rel; do
+            ours["$rel"]=1
+        done < <(python3 - "$retail" "$retail/$MANIFEST_NAME" <<'PY'
+import json
+import os
+import sys
+
+retail, manifest = sys.argv[1:3]
+try:
+    with open(manifest, encoding="utf-8-sig") as handle:
+        data = json.load(handle)
+except Exception:
+    sys.exit(0)
+out = set()
+for rel in data.get("added") or []:
+    if isinstance(rel, str):
+        out.add(rel.replace("\\", "/"))
+for rel in data.get("files") or {}:
+    out.add(rel.replace("\\", "/"))
+for backup in data.get("backups") or []:
+    if not isinstance(backup, str) or not backup:
+        continue
+    root = os.path.join(retail, backup.replace("\\", "/"))
+    for folder, _, names in os.walk(root):
+        for name in names:
+            out.add(os.path.relpath(os.path.join(folder, name), root).replace(os.sep, "/"))
+sys.stdout.write("".join(rel + "\0" for rel in sorted(out)))
+PY
+)
+    fi
+
     while IFS= read -r -d '' file; do
         rel=${file#"$PAYLOAD"/}
         case $rel in
@@ -719,10 +776,12 @@ install_mod() {
         fi
 
         if [[ -e $dest || -L $dest ]]; then
-            mkdir -p -- "$(dirname -- "$backup/$actual_rel")"
-            copy_file "$dest" "$backup/$actual_rel"
-            replaced+=("$actual_rel")
-        else
+            if [[ -z ${ours[$actual_rel]:-} ]]; then
+                mkdir -p -- "$(dirname -- "$backup/$actual_rel")"
+                copy_file "$dest" "$backup/$actual_rel"
+                replaced+=("$actual_rel")
+            fi
+        elif [[ -z ${ours[$actual_rel]:-} ]]; then
             added+=("$actual_rel")
         fi
 
@@ -856,6 +915,7 @@ PY
     Say ""
     Say "Installed HITMAN Co-op into $game"
     Say "Start the game, press ~ (or ^ on some keyboards) and click CO-OP to host or join."
+    tailscale_hint
     Say "Works with the game online or offline: co-op never uses IOI's servers."
     Say ""
     Say "If the CO-OP window doesn't appear, set this for the game:"

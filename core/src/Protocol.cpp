@@ -36,6 +36,7 @@ const char* MsgTypeName(MsgType p_Type) {
         case MsgType::NpcKnockedOut: return "NpcKnockedOut";
         case MsgType::PlayerState: return "PlayerState";
         case MsgType::NpcCheck: return "NpcCheck";
+        case MsgType::NpcClaim: return "NpcClaim";
         case MsgType::Pose: return "Pose";
         case MsgType::VictimPose: return "VictimPose";
         default: return "Unknown";
@@ -263,6 +264,15 @@ bool MsgSceneInfo::Read(ByteReader& r) {
     }
 
     return true;
+}
+
+void MsgNpcClaim::Write(ByteWriter& w) const {
+    w.U32(epoch);
+    w.U64(id);
+}
+
+bool MsgNpcClaim::Read(ByteReader& r) {
+    return r.U32(epoch) && r.U64(id) && id != 0;
 }
 
 void MsgSceneReady::Write(ByteWriter& w) const {

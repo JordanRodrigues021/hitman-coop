@@ -259,6 +259,18 @@ TEST(Protocol_PoseFitsAndRoundTrips) {
 }
 
 
+TEST(Protocol_NpcClaimRoundTripsAndRejectsNoId) {
+    MsgNpcClaim m { 7, 0x1234abcdull }, o;
+    REQUIRE(Decode(Encode(m), o));
+    CHECK(o.epoch == 7 && o.id == 0x1234abcdull);
+    // An id of 0 names no NPC: refused, not applied to "nobody".
+    CHECK(!Decode(Encode(MsgNpcClaim { 7, 0 }), o));
+    // Cut short: refused.
+    auto s_Bytes = Encode(m);
+    s_Bytes.pop_back();
+    CHECK(!Decode(s_Bytes, o));
+}
+
 TEST(Protocol_NpcPoseCarriesOnlyChangedBones) {
     MsgNpcPose m, o;
     m.epoch = 3;

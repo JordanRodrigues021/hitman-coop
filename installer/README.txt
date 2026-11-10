@@ -1,5 +1,5 @@
 =====================================================
-   HITMAN CO-OP 0.13.94
+   HITMAN CO-OP 0.13.95
    * created by Jordan Rodrigues *
 =====================================================
 
@@ -8,17 +8,32 @@ No IOI, Peacock, Steam or Epic servers are used: it works with the game online o
 
 INSTALL (both players, the same version)
   1. Close the game.
-  2. Run HitmanCoop-Setup-0.13.94.exe and click INSTALL.
-     (Windows may say "Windows protected your PC" because the file isn't signed:
-     click "More info", then "Run anyway".)
-     Prefer a zip? Extract HitmanCoop-0.13.94.zip and double-click Install.bat.
+  2. Run HitmanCoop-Setup-0.13.95.exe and click Install.
+     Prefer a zip? Extract all of HitmanCoop-0.13.95.zip and run
+     HitmanCoop-Setup.exe from the extracted folder.
+  3. Choose how you'll connect: a join code (nothing to set up) or Tailscale (a
+     private network between your two PCs; the setup installs it, signs you in in
+     your browser and shows your Tailscale address).
   The setup finds Steam, Epic and Heroic/Legendary installs by itself, or you pick
   the game folder (the one with Retail inside; picking Retail itself works too).
-  It writes what it did to Retail\HitmanCoop-install.log.
+  It writes what it did to Retail\HitmanCoop-install.log, and adds HITMAN Co-op to
+  Settings > Apps, where you can uninstall it.
+
+IF WINDOWS OR YOUR BROWSER WARNS ABOUT THE DOWNLOAD
+  HITMAN Co-op is free, open source and has no virus. Mods that hook into a game
+  (and anything new and rarely downloaded) are often flagged by mistake.
+  - "Windows protected your PC" (SmartScreen): click "More info", then "Run anyway".
+  - Chrome or Edge "isn't commonly downloaded" / "blocked": open the downloads list,
+    choose Keep (Chrome: the three dots, then "Download suspicious file").
+  - Windows Security removed a file: open Windows Security > Virus & threat
+    protection > Protection history, pick the HITMAN Co-op entry, Actions > Allow,
+    then run the setup again. The setup tells you which file was taken.
+  - Check the download: its SHA-256 is on the release page (SHA256SUMS).
+  The source code is on GitHub for anyone to read and build.
   It installs the build for your game version: the current game (3.290.x), or
   3.280.x for players who can't update. Both players need the same game version.
 
-  On Linux / Steam Deck (Proton), extract HitmanCoop-0.13.94-linux.tar.gz (or the
+  On Linux / Steam Deck (Proton), extract HitmanCoop-0.13.95-linux.tar.gz (or the
   zip), open a terminal in that folder and run:
       bash installer.sh
   To remove it again:
@@ -30,10 +45,11 @@ INSTALL (both players, the same version)
 PLAY
   1. Both start the game and press ~ (the key under Esc; ^ on German keyboards).
   2. Click CO-OP in the bar at the top.
-  3. Host: click Host. The window shows this PC's addresses (Tailscale and local).
-  4. Friend: type the host's address under "Join a friend" and click Join.
-     Over the internet, both install Tailscale (tailscale.com) and use the host's
-     Tailscale address (100.x.x.x). On the same network, the local address works.
+  3. Host: click Host. The window shows a join code, and this PC's addresses
+     (Tailscale, with a copy button, and local).
+  4. Friend: type the join code (or the host's address) under "Join a friend" and
+     click Join. With Tailscale use the host's Tailscale address (100.x.x.x); on the
+     same network, the local address works.
   5. Host starts a mission. The friend starts any mission at the SAME LOCATION
      and is taken to the host's exact mission there.
 
@@ -161,9 +177,20 @@ COMPATIBILITY
 TEST YOUR CONNECTION (no game needed)
   In the setup window, click "Test connection" (or run Test-Connection.exe).
 
+"YOUR ACCOUNT SIGNED IN ON ANOTHER COMPUTER"
+  That message comes from Steam or HITMAN's own servers, never from co-op (co-op
+  carries on through it). Common causes, which the mod now checks and tells you:
+  - Both PCs signed in to the same Steam account: each player needs their own.
+  - A copy borrowed through Steam Family Sharing: the owner starting a game signs
+    the borrower out.
+  - A Tailscale exit node or a VPN that changes your internet address mid-game.
+  The mod also no longer holds back any of the game's own online events, the first
+  suspect for these errors in 0.13. CO-OP > About > Copy diagnostics shows the
+  "Online" line (what happened to Steam and HITMAN's servers, and when).
+
 UNINSTALL
-  Run the setup again and click Uninstall (or double-click Uninstall.bat). On
-  Linux, run "bash installer.sh --uninstall". The game folder is put back exactly
+  Settings > Apps > HITMAN Co-op > Uninstall, or run the setup again and click
+  Uninstall. On Linux, run "bash installer.sh --uninstall". The game folder is put back exactly
   as it was: the mod removed, a mod loader we added removed (kept if other mods
   need it), one we replaced restored.
 

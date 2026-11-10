@@ -678,6 +678,35 @@ TEST(Session_NpcInTheClientsHandsIsRunByTheClient) {
     CHECK(!d.hostWorld.puppets.count(0x1003) && d.clientWorld.puppets.count(0x1003));
 }
 
+TEST(Session_NpcOurPlayerHitsIsOursToRun) {
+    Duo d(43);
+    d.HostLoads(c_Miami, 10);
+    d.ClientLoads(c_Miami, 10, 0.f);
+    d.hostWorld.player.pos = FakeWorld::Center(0x1000);
+    d.clientWorld.player.pos = d.hostWorld.player.pos + Vec3 { 1.f, 0.f, 0.f };
+    d.Start();
+    REQUIRE(d.StepUntilSynced(2.0));
+    d.Step(3.0);
+    REQUIRE(d.clientWorld.puppets.count(0x1005));
+
+    // The client's 47 throws something at it: its own AI back at once (no wait for a round trip),
+    // and the host hands it over.
+    d.client.ClaimNpc(0x1005, d.t);
+    CHECK_MSG(!d.clientWorld.puppets.count(0x1005), "still a puppet on the client right after its 47 hit it");
+    d.Step(1.0);
+    CHECK_MSG(d.hostWorld.puppets.count(0x1005), "the host didn't hand over an NPC the client's 47 hit");
+    CHECK(!d.clientWorld.puppets.count(0x1005));
+
+    // The host's 47 hits one of its own: nothing changes hands, nothing breaks.
+    d.host.ClaimNpc(0x1006, d.t);
+    d.Step(0.5);
+    CHECK(!d.hostWorld.puppets.count(0x1006));
+
+    // Left alone, with the players together: back to the host in time.
+    d.Step(12.0);
+    CHECK(!d.hostWorld.puppets.count(0x1005) && d.clientWorld.puppets.count(0x1005));
+}
+
 TEST(Session_PauseHoldsBothGames) {
     Duo d(35);
     d.HostLoads(c_Miami, 2);
@@ -1641,4 +1670,21 @@ TEST(Socket_ResolveRejectsBadInput) {
     CHECK(!ResolveEndpoint("1.2.3.4:99999", kDefaultPort, e, err));
     CHECK(!ResolveEndpoint("1.2.3.4:abc", kDefaultPort, e, err));
     CHECK(ResolveEndpoint(" 10.0.0.5 ", kDefaultPort, e, err) && e.ip == 0x0A000005 && e.port == kDefaultPort);
+    // Pasted from a chat, with a tab and a line end: was "Invalid port".
+    CHECK(ResolveEndpoint("\t100.64.1.2:47050 \r\n", kDefaultPort, e, err) && e.ip == 0x64400102 && e.port == 47050);
+    // IPv6: refused with a word about it, not as a port.
+    CHECK(!ResolveEndpoint("fe80::1", kDefaultPort, e, err) && err.find("IPv6") != std::string::npos);
+    CHECK(!ResolveEndpoint("[::1]:47047", kDefaultPort, e, err) && err.find("IPv6") != std::string::npos);
+}
+
+TEST(Socket_TailscaleAddressIsFromTheAdapters) {
+    // Whatever this PC has: empty, or a 100.64.0.0/10 address (never a name lookup's leftovers).
+    const std::string s_Address = LocalTailscaleAddress();
+
+    if (!s_Address.empty()) {
+        Endpoint e;
+        std::string err;
+        REQUIRE(ResolveEndpoint(s_Address, kDefaultPort, e, err));
+        CHECK((e.ip & 0xFFC00000u) == 0x64400000u);
+    }
 }

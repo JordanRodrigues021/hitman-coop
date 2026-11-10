@@ -248,6 +248,36 @@ void Session::SendMissionEvent(const std::string& p_Name, const std::string& p_J
     m_Conn->SendReliable(MsgType::MissionEvent, Encode(s_Event));
 }
 
+void Session::ClaimNpc(uint64_t p_Id, double p_Now) {
+    if (p_Id == 0 || !IsSynced() || !m_Conn)
+        return;
+
+    const bool s_New = !Claimed(p_Id);
+    m_ClaimedUntil[p_Id] = p_Now + 3.0;
+
+    if (!s_New)
+        return;
+
+    ++m_LogCount.claims;
+    const bool s_Theirs = OwnerOf(p_Id) != MyOwner();
+    Log(LogLevel::Debug, "npc", "%016llx hit by our 47%s", static_cast<unsigned long long>(p_Id), s_Theirs ? ": ours to run from now" : "");
+
+    // A puppet here: its own AI back at once, before the hit's reaction is decided.
+    if (m_Puppeted.count(p_Id))
+        ReconcilePuppets();
+
+    // Host: the owners are looked at now, so the client's game hears straight away that this NPC
+    // is ours (both games ran it until the next look).
+    if (m_Role == SessionRole::Host && s_Theirs)
+        m_NextOwnerCheck = std::min(m_NextOwnerCheck, p_Now);
+
+    if (m_Role == SessionRole::Client && s_Theirs)
+        m_Conn->SendReliable(MsgType::NpcClaim, Encode(MsgNpcClaim { m_Epoch, p_Id }));
+
+    // Old claims go (a long fight keeps renewing its own).
+    std::erase_if(m_ClaimedUntil, [&](const auto& p_Claim) { return p_Claim.second < p_Now - 10.0; });
+}
+
 void Session::SendChat(const std::string& p_Text, bool p_Quick) {
     if (m_State != SessionState::Connected || !m_Conn || p_Text.empty())
         return;
@@ -982,6 +1012,19 @@ void Session::HandleMessage(const Message& p_Msg, double p_Now) {
             break;
         }
 
+        case MsgType::NpcClaim: {
+            MsgNpcClaim s_Claim;
+
+            // The client's 47 hit one of ours: the client's game runs it a while (as for a takedown),
+            // unless our own 47 is on it too.
+            if (m_Role == SessionRole::Host && Decode(p_Msg.payload, s_Claim) && s_Claim.epoch == m_Epoch && IsSynced()) {
+                m_ClientChasedUntil[s_Claim.id] = p_Now + 3.0;
+                m_NextOwnerCheck = std::min(m_NextOwnerCheck, p_Now);
+            }
+
+            break;
+        }
+
         case MsgType::MissionEvent: {
             MsgMissionEvent s_Event;
 
@@ -1007,8 +1050,8 @@ void Session::HandleHello(const MsgHello& p_Hello, double p_Now) {
         // The player's words first (versions as they see them), the protocol numbers after.
         s_Reason = "Different HITMAN Co-op versions: the host has " + m_Config.modVersion + ", you have " +
             (p_Hello.modVersion.empty() ? std::string("an older one") : p_Hello.modVersion) +
-            ". Both players need the same version (mod protocol " + std::to_string(kProtocolVersion) + " vs " +
-            std::to_string(p_Hello.protocol) + ").";
+            ". Both players need the same version: get it from the HITMAN Co-op Discord or GitHub page and run its setup (mod protocol " +
+            std::to_string(kProtocolVersion) + " vs " + std::to_string(p_Hello.protocol) + ").";
     }
     else if (!m_Config.allowGameVersionMismatch && p_Hello.gameVersion != m_Config.gameVersion) {
         s_Reason = "Game version mismatch (host " + m_Config.gameVersion + ", you " + p_Hello.gameVersion + ").";
@@ -1498,6 +1541,7 @@ void Session::ReleasePuppets() {
     m_NpcOwner.clear();
     m_OwnerChangedAt.clear();
     m_ClientChasedUntil.clear();
+    m_ClaimedUntil.clear();
     m_ContactId = 0;
     m_ContactUntil = -1.0;
     m_NpcSent.clear();
@@ -2079,7 +2123,7 @@ void Session::LogStats(double p_Now) {
         " | npcs %zu listed, %zu ours, %zu puppets, %zu theirs without data"
         " | sent %.1f snapshots/s (%.0f npcs/s), %.1f poses/s (%.1f whole, %.0f bones each), %zu posed"
         " | got %.1f snapshots/s (%.0f npcs/s), %.1f poses/s, %u waiting for a whole one, %zu puppets posed"
-        " | %u changed hands, puppets +%u -%u (%u for no data, %u didn't stay put) | puppet drift avg %.2f m, max %.2f m"
+        " | %u changed hands, puppets +%u -%u (%u for no data, %u didn't stay put, %u hit by our 47) | puppet drift avg %.2f m, max %.2f m"
         " | playback delay npcs %.0f ms, partner %.0f ms",
         IsSynced() ? "together" : "connected, not together", s_Stats.rttMs, m_MinRtt < 1e8 ? m_MinRtt : 0.0, s_Stats.lossPercent,
         s_Stats.jitterMs, s_OutKbps, s_InKbps, s_Stats.reliablePending, static_cast<unsigned long long>(s_Stats.unreliableDeferred),
@@ -2089,7 +2133,7 @@ void Session::LogStats(double p_Now) {
         c.snapshotsOut / s_Span, c.npcsOut / s_Span, c.posesOut / s_Span, c.posesFullOut / s_Span,
         c.posesOut ? static_cast<double>(c.poseBonesOut) / c.posesOut : 0.0, m_PoseIds.size(),
         c.snapshotsIn / s_Span, c.npcsIn / s_Span, c.posesIn / s_Span, c.posesWaiting, s_Posed,
-        c.ownerChanges, c.puppetsOn, c.puppetsOff, c.staleReleased, c.unfollowing,
+        c.ownerChanges, c.puppetsOn, c.puppetsOff, c.staleReleased, c.unfollowing, c.claims,
         c.driftCount ? c.driftSum / c.driftCount : 0.0, c.driftMax,
         s_DelayCount ? s_DelaySum / s_DelayCount * 1000.0 : 0.0, m_RemoteAvatar.Delay() * 1000.0);
 }
