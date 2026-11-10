@@ -279,7 +279,7 @@ mod to where it is now, and I really appreciate them.
   to join the Discord, and put their hand up to help moderate it too. Thank you!
 
 Want to be on this list? [Applications](https://forms.gle/vtcxvPjS4GTSKxbG9) for the founding round
-are open until 15 November 2026.
+are open until 30 November 2026.
 
 ## Support the developer
 
