@@ -30,10 +30,8 @@ with (by platform and region), hop in the two-player voice rooms, get help insta
 suggest stuff and see what I'm working on. New releases get posted there first, and you can share
 clips of your best double hits. Honestly it's the quickest way to get a bug fixed.
 
-Founding Team applications are open until 30 November 2026. I'm looking for moderators, testers,
-contributors and people to host events. Everyone who gets in during this first round keeps the
-Founding Team role on the server for good and gets added to the [credits](#founding-team).
-You can [apply here](https://forms.gle/vtcxvPjS4GTSKxbG9).
+Team applications are open until 30 November 2026. I'm looking for moderators, testers,
+contributors and people to host events. You can [apply here](https://forms.gle/vtcxvPjS4GTSKxbG9).
 
 ## A note on AI
 
@@ -278,7 +276,7 @@ mod to where it is now, and I really appreciate them.
 - **Aerial Bot**: sent me a huge amount of bug reports and suggestions, was one of the first people
   to join the Discord, and put their hand up to help moderate it too. Thank you!
 
-Want to be on this list? [Applications](https://forms.gle/vtcxvPjS4GTSKxbG9) for the founding round
+The Founding Team role isn't given out any more. Want to help? [Team applications](https://forms.gle/vtcxvPjS4GTSKxbG9)
 are open until 30 November 2026.
 
 ## Support the developer
