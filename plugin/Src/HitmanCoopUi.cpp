@@ -2,6 +2,12 @@
 // notifications, countdown, mission summary) and the CO-OP window. Render thread; what it shows of
 // the game thread's state is copied under m_StatusMutex.
 #include "HitmanCoop.h"
+#include "BlackBox.h"
+#include "CrashTrace.h"
+#include "CrashGuards.h"
+#include "GameTweaks.h"
+#include "PoseHook.h"
+#include "WorldScript.h"
 #include "CoopText.h"
 #include "CrashGuards.h"
 #include "GamePause.h"
@@ -1795,6 +1801,22 @@ std::string HitmanCoop::Diagnostics(const coop::SessionStatus& p_Status) {
 
         if (!c.worst.empty())
             s_Out << "  worst: " << c.worst << "\n";
+    }
+
+    {
+        // The newer machinery, each in a line: what it found in this mission and what it did.
+        const PoseHook::PinStats s_Pins = PoseHook::TakePinStats();
+        char s_Line[320];
+        std::snprintf(s_Line, sizeof(s_Line), "Pose pins: %s, %u NPCs pinned, world matrix %s, %u poses put right since the last look (up to %.0f deg), %u unusable\n",
+            PoseHook::PinsOn() ? "on" : "off", s_Pins.pinned, s_Pins.layout == 1 ? "4x4" : s_Pins.layout == 2 ? "4x3" : "not seen yet", s_Pins.corrected,
+            s_Pins.maxAngle, s_Pins.unusable);
+        s_Out << s_Line;
+        s_Out << "Script sync: " << WorldScript::Describe() << "\n";
+        s_Out << "NPC ids: " << m_World.DescribeNpcIds() << "\n";
+        s_Out << "Game files: " << GameTweaks::State() << "\n";
+        std::snprintf(s_Line, sizeof(s_Line), "Flight recorder: %zu entries over %.0f s; crash reports name %zu of the mod's functions, %d faults caught, restart guard 4 stepped in %u times\n",
+            BlackBox::Count(), BlackBox::Span(), CrashTrace::SymbolCount(), CrashTrace::CaughtFaults(), CrashGuards::EmptySlots());
+        s_Out << s_Line;
     }
 
     s_Out << "Log level: " << coop::LogLevelName(CoopLog::Level()) << "\n";

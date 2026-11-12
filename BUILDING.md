@@ -153,6 +153,36 @@ text. IP addresses are masked (`203.0.x.x`) unless `[log] show_addresses = true`
 CO-OP > About > Save bug report zips both logs, crash reports, the settings (masked) and the
 diagnostics into `Retail\mods\HitmanCoop-reports\`.
 
+### The flight recorder and crash reports
+
+`plugin/Src/BlackBox.cpp` keeps the last 8192 entries of everything the log would say at debug
+level, plus engine-side detail that never goes to the file (every game event, every pin of a
+level interaction, stand-in items, the nearest NPCs every 20 s), whatever the log level is. It is
+saved as `HitmanCoop-blackbox.txt` into every bug report and, by the crash handler, as
+`HitmanCoop-blackbox-crash.txt` beside the crash report. New code should `BlackBox::Note(category,
+format, ...)` what it decides and why; `BlackBox::Scope` names the section a crash report then
+says the mod was in, and a call into the game that may fault goes under SEH inside a
+`BlackBox::Guarded` scope (reported as caught, no dump).
+
+A crash report (`HitmanCoop-crash.txt`) has the registers, the faulting instruction's bytes, the
+stack with the mod's own frames by name, and the recorder's last 40 entries. The names come from
+`HitmanCoop.sym` beside the DLL, written by `tools/package.ps1` from the build's symbol file
+(`tools/symbolize.py --export`). The symbol files themselves are kept per version in
+`_dist/symbols/<version>/` (not published). To look into a report:
+
+    python tools/symbolize.py x _dist/symbols/0.13.96/game-3.290/HitmanCoop.pdb --crash HitmanCoop-crash.txt
+    python tools/gamedis.py "<game>/Retail/HITMAN3.exe" at 0x16ab68        (the game's code around an address)
+    python tools/check-patterns.py "<game>/Retail/HITMAN3.exe"             (every patch pattern against a game build)
+
+### The game's own files
+
+`installer/setup/GameFiles.cs` (and `plugin/Src/GameTweaks.cpp`, `tools/gamecfg.py`) read and write
+the game's encrypted settings file `Retail\thumbs.dat`. The setup sets
+`[application] OnlineDisableAutoReconnect=0`, keeps the original beside it and notes the old value
+in the install manifest; uninstalling puts it back; the mod re-applies it after a game update.
+Changes to the game's code are made in memory only (`plugin/Src/CrashGuards.cpp`), found by
+pattern, so they survive game updates and never leave a changed executable on disk.
+
 ## Tests
 
 - `core/build22/RelWithDebInfo/coop_tests.exe` (or `core/build/Release` in CI): the session,

@@ -1,4 +1,5 @@
 #include "Log.h"
+#include "BlackBox.h"
 
 #include <Windows.h>
 
@@ -185,7 +186,8 @@ coop::LogLevel Level() {
 }
 
 bool On(coop::LogLevel p_Level) {
-    return static_cast<int>(p_Level) <= g_Level.load();
+    // Debug lines are always made: the flight recorder keeps them when the file doesn't.
+    return static_cast<int>(p_Level) <= std::max(g_Level.load(), static_cast<int>(coop::LogLevel::Debug));
 }
 
 void SetShowAddresses(bool p_Show) {
@@ -203,14 +205,29 @@ void SetMirror(std::function<void(const std::string&)> p_Mirror) {
 }
 
 void Write(coop::LogLevel p_Level, std::string_view p_Category, std::string_view p_Text) {
-    if (static_cast<int>(p_Level) > g_Level.load())
+    const bool s_ToFile = static_cast<int>(p_Level) <= g_Level.load();
+
+    if (!s_ToFile && p_Level > coop::LogLevel::Debug)
         return;
+
+    if (!s_ToFile) {
+        // Only for the flight recorder (BlackBox.h): the file stays at the level the player chose.
+        std::string s_Masked;
+        {
+            std::lock_guard s_Lock(g_Mutex);
+            s_Masked = MaskAddresses(p_Text);
+        }
+        BlackBox::NoteText(p_Category, s_Masked, coop::LogLevelName(p_Level)[0]);
+        return;
+    }
 
     char s_Head[96];
     std::snprintf(s_Head, sizeof(s_Head), "  %-5s %-8.*s| ", coop::LogLevelName(p_Level), static_cast<int>(std::min<size_t>(p_Category.size(), 8)),
         p_Category.data());
     std::lock_guard s_Lock(g_Mutex);
-    std::string s_Line = Stamp() + s_Head + MaskAddresses(p_Text);
+    const std::string s_Masked = MaskAddresses(p_Text);
+    BlackBox::NoteText(p_Category, s_Masked, coop::LogLevelName(p_Level)[0]);
+    std::string s_Line = Stamp() + s_Head + s_Masked;
 
     // Control characters (an NPC name with a newline) would break the one-line format.
     for (char& c : s_Line)

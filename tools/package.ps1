@@ -109,6 +109,17 @@ foreach ($B in $Builds) {
 
     Copy-Item $B.ModDll (Join-Path $Files "mods\HitmanCoop.dll")
     Sign-File (Join-Path $Files "mods\HitmanCoop.dll")
+
+    # The mod's function table, beside the DLL: a player's crash report then names the mod's own
+    # functions (plugin\Src\CrashTrace.cpp). And the symbol file itself is kept for this version,
+    # so a report can be looked into long after the build folder has moved on.
+    $Pdb = [System.IO.Path]::ChangeExtension($B.Built, ".pdb")
+    if (-not (Test-Path $Pdb)) { throw "No symbol file for the $($B.Game) build: $Pdb" }
+    & python -I (Join-Path $Root "tools\symbolize.py") $B.Built $Pdb --export (Join-Path $Files "mods\HitmanCoop.sym")
+    if ($LASTEXITCODE -ne 0) { throw "Could not write HitmanCoop.sym for the $($B.Game) build" }
+    $Keep = Join-Path $Root "_dist\symbols\$Version\game-$($B.Game)"
+    New-Item -ItemType Directory -Force $Keep | Out-Null
+    Copy-Item $B.Built, $Pdb $Keep -Force
 }
 
 Copy-Item $NetTest (Join-Path $Stage "Test-Connection.exe")

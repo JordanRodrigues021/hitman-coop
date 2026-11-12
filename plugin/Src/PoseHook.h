@@ -55,6 +55,32 @@ bool WatchedPose(void* p_Animator, std::vector<Bone>& p_Out);
     uint32_t NativePoseOf(void* p_Animator, std::vector<Bone>& p_Out);
     void ClearExtraPoses();
 
+// World pins. A character the partner's game runs (a puppet) is put where the partner's game has
+// it every frame, but its own movement code still runs here on its last orders and turns or
+// shifts the body afterwards: players saw NPCs walk north facing south. A pin says where the
+// skeleton must stand in the world (rot: x y z w, pos: x y z); the hook then moves the root bone
+// by whatever the character's own transform is off, so it is drawn exactly there, posed by the
+// partner or by its own animation.
+struct Pin {
+    void* animator;
+    float rot[4];
+    float pos[3];
+};
+// All pins at once, every frame (sorted in place; the vector is left holding the old pins).
+void SetPins(std::vector<Pin>& p_Pins);
+void SetPinsOn(bool p_On);
+bool PinsOn();
+struct PinStats {
+    uint32_t pinned = 0;    // characters pinned right now
+    int layout = 0;         // the engine's world matrix: 0 not seen yet, 1: 4x4, 2: 4x3
+    uint32_t corrected = 0; // pose updates since the last call where the skeleton had to be moved
+    uint32_t aligned = 0;   // ... where it stood right already
+    uint32_t unusable = 0;  // ... where the world matrix wasn't one (nothing moved)
+    float maxAngle = 0.f;   // the largest turn corrected, degrees
+    uint32_t angles[5] {};  // corrections by angle: <10, 10-45, 45-80, 80-100, 100+ degrees
+};
+PinStats TakePinStats();
+
 // Diagnostics for the test channel.
 uint32_t SourceBoneCount();
 uint32_t TargetBoneCount();

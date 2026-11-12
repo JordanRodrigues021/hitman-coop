@@ -248,19 +248,33 @@ void Session::SendMissionEvent(const std::string& p_Name, const std::string& p_J
     m_Conn->SendReliable(MsgType::MissionEvent, Encode(s_Event));
 }
 
-void Session::ClaimNpc(uint64_t p_Id, double p_Now) {
+void Session::ClaimNpc(uint64_t p_Id, double p_Now, double p_Seconds, const char* p_Why) {
     if (p_Id == 0 || !IsSynced() || !m_Conn)
         return;
 
+    p_Seconds = std::clamp(p_Seconds, 0.5, 120.0);
     const bool s_New = !Claimed(p_Id);
-    m_ClaimedUntil[p_Id] = p_Now + 3.0;
+    double& s_Until = m_ClaimedUntil[p_Id];
+    s_Until = std::max(s_Until, p_Now + p_Seconds);
+    const bool s_Theirs = OwnerOf(p_Id) != MyOwner();
+
+    // Client: the host hears of a new claim, and of one kept going before what it knows runs out.
+    if (m_Role == SessionRole::Client) {
+        double& s_Told = m_ClaimToldUntil[p_Id];
+
+        if (s_New || s_Told < p_Now + 1.5 || s_Until > s_Told + 5.0) {
+            const double s_For = std::clamp(s_Until - p_Now, 0.5, 120.0);
+            m_Conn->SendReliable(MsgType::NpcClaim, Encode(MsgNpcClaim { m_Epoch, p_Id, static_cast<uint16_t>(s_For * 10.0) }));
+            s_Told = s_Until;
+        }
+    }
 
     if (!s_New)
         return;
 
     ++m_LogCount.claims;
-    const bool s_Theirs = OwnerOf(p_Id) != MyOwner();
-    Log(LogLevel::Debug, "npc", "%016llx hit by our 47%s", static_cast<unsigned long long>(p_Id), s_Theirs ? ": ours to run from now" : "");
+    Log(LogLevel::Debug, "npc", "%016llx %s%s (ours for %.0f s)", static_cast<unsigned long long>(p_Id), p_Why ? p_Why : "claimed",
+        s_Theirs ? ": ours to run from now" : "", p_Seconds);
 
     // A puppet here: its own AI back at once, before the hit's reaction is decided.
     if (m_Puppeted.count(p_Id))
@@ -271,11 +285,9 @@ void Session::ClaimNpc(uint64_t p_Id, double p_Now) {
     if (m_Role == SessionRole::Host && s_Theirs)
         m_NextOwnerCheck = std::min(m_NextOwnerCheck, p_Now);
 
-    if (m_Role == SessionRole::Client && s_Theirs)
-        m_Conn->SendReliable(MsgType::NpcClaim, Encode(MsgNpcClaim { m_Epoch, p_Id }));
-
     // Old claims go (a long fight keeps renewing its own).
     std::erase_if(m_ClaimedUntil, [&](const auto& p_Claim) { return p_Claim.second < p_Now - 10.0; });
+    std::erase_if(m_ClaimToldUntil, [&](const auto& p_Claim) { return p_Claim.second < p_Now - 10.0; });
 }
 
 void Session::SendChat(const std::string& p_Text, bool p_Quick) {
@@ -1015,11 +1027,15 @@ void Session::HandleMessage(const Message& p_Msg, double p_Now) {
         case MsgType::NpcClaim: {
             MsgNpcClaim s_Claim;
 
-            // The client's 47 hit one of ours: the client's game runs it a while (as for a takedown),
-            // unless our own 47 is on it too.
+            // The client's game has a reason to run this one (its 47 hit it, or it is looking into
+            // something only that game knows of): the client's game runs it that long (as for a
+            // takedown), unless our own 47 is on it too.
             if (m_Role == SessionRole::Host && Decode(p_Msg.payload, s_Claim) && s_Claim.epoch == m_Epoch && IsSynced()) {
-                m_ClientChasedUntil[s_Claim.id] = p_Now + 3.0;
+                double& s_Until = m_ClientChasedUntil[s_Claim.id];
+                s_Until = std::max(s_Until, p_Now + std::clamp(s_Claim.tenths / 10.0, 0.5, 120.0));
                 m_NextOwnerCheck = std::min(m_NextOwnerCheck, p_Now);
+                Log(LogLevel::Debug, "npc", "%016llx claimed by the client's game for %.1f s", static_cast<unsigned long long>(s_Claim.id),
+                    s_Claim.tenths / 10.0);
             }
 
             break;
@@ -1514,7 +1530,7 @@ void Session::ReconcilePuppets() {
             const bool s_Stale = s_Npc.Alive() && !KnockedOut(s_Npc) && OwnerOf(s_Npc.id) != MyOwner() && !InContact(s_Npc.id);
             m_LogCount.staleReleased += s_Stale ? 1 : 0;
             ++m_LogCount.puppetsOff;
-            Log(s_Stale ? LogLevel::Debug : LogLevel::Trace, "npc", "%016llx runs its own AI again: %s", static_cast<unsigned long long>(s_Npc.id),
+            Log(LogLevel::Debug, "npc", "%016llx runs its own AI again: %s", static_cast<unsigned long long>(s_Npc.id),
                 s_Stale ? "no positions from the partner for 5 s" : !s_Npc.Alive() ? "dead" : KnockedOut(s_Npc) ? "knocked out" :
                 InContact(s_Npc.id) ? "our 47 is on it" : "ours to run now");
             m_Puppeted.erase(s_Npc.id);
@@ -1523,7 +1539,7 @@ void Session::ReconcilePuppets() {
         }
 
         if (s_Want)
-            Log(LogLevel::Trace, "npc", "%016llx is a puppet of the partner's game now", static_cast<unsigned long long>(s_Npc.id));
+            Log(LogLevel::Debug, "npc", "%016llx is a puppet of the partner's game now", static_cast<unsigned long long>(s_Npc.id));
 
         m_World.SetNpcPuppet(s_Npc.id, s_Want);
     }
@@ -1542,6 +1558,7 @@ void Session::ReleasePuppets() {
     m_OwnerChangedAt.clear();
     m_ClientChasedUntil.clear();
     m_ClaimedUntil.clear();
+    m_ClaimToldUntil.clear();
     m_ContactId = 0;
     m_ContactUntil = -1.0;
     m_NpcSent.clear();
@@ -1589,7 +1606,7 @@ void Session::UpdateSharedNpcs(double p_Now) {
                     continue;
                 }
 
-                if (s_Npc.tension >= 4)
+                if (s_Npc.tension >= m_Config.ownerBusyTension)
                     continue;
 
                 // Changed hands a moment ago: it stays put a while (see ownerHoldTime).

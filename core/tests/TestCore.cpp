@@ -260,9 +260,9 @@ TEST(Protocol_PoseFitsAndRoundTrips) {
 
 
 TEST(Protocol_NpcClaimRoundTripsAndRejectsNoId) {
-    MsgNpcClaim m { 7, 0x1234abcdull }, o;
+    MsgNpcClaim m { 7, 0x1234abcdull, 450 }, o;
     REQUIRE(Decode(Encode(m), o));
-    CHECK(o.epoch == 7 && o.id == 0x1234abcdull);
+    CHECK(o.epoch == 7 && o.id == 0x1234abcdull && o.tenths == 450);
     // An id of 0 names no NPC: refused, not applied to "nobody".
     CHECK(!Decode(Encode(MsgNpcClaim { 7, 0 }), o));
     // Cut short: refused.

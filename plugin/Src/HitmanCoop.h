@@ -62,6 +62,7 @@ private:
         double frameSum = 0.0, frameMax = 0.0;
         double modSum = 0.0, modMax = 0.0;
         uint32_t skippedThinks = 0;
+        uint32_t emptySlots = 0;
     } m_Perf;
     // The bug report (CO-OP > About): logs, crash reports, settings and diagnostics in one zip.
     void SaveBugReport(const std::string& p_Diagnostics);
@@ -92,6 +93,7 @@ private:
 
     DECLARE_PLUGIN_DETOUR(HitmanCoop, bool, OnLoadScene, ZEntitySceneContext*, SSceneInitParameters&);
     DECLARE_PLUGIN_DETOUR(HitmanCoop, void, OnClearScene, ZEntitySceneContext*, bool p_FullyUnloadScene);
+    DECLARE_PLUGIN_DETOUR(HitmanCoop, bool, OnSignalOutputPin, ZEntityRef p_Entity, uint32_t p_PinId, const ZObjectRef& p_Data);
     // Our mission restarted (or a save of it loaded): the partner's restarts too.
     void OnMissionRestarted(const std::string& p_Scene);
     std::string m_ClearedMission; // the mission a full clear left, until the next scene
@@ -131,6 +133,7 @@ private:
     // NPCs killed only to match the partner's game. Off: never touch the game's online events
     // (dropping them is the first suspect for "signed in on another computer").
     std::atomic<bool> m_HidePartnerKills { false };
+    bool m_CrashDump = true;
     double m_NextTailscaleCheck = 0.0;
     std::atomic<bool> m_TailscaleCopied { false };
 

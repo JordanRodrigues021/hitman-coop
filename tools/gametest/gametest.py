@@ -44,6 +44,8 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
+sys.path.insert(0, os.path.join(ROOT, "tools"))
+import gamecfg  # noqa: E402  (the game's encrypted settings file, as the setup reads and writes it)
 STEAM_APP_ID = "1659040"
 
 
@@ -125,7 +127,7 @@ class Game:
             raise Failed(f"no build in {payload}: run tools/package.ps1 first")
         os.makedirs(self.backup, exist_ok=True)
         keep = [os.path.relpath(os.path.join(d, n), payload) for d, _, files in os.walk(payload) for n in files]
-        keep += ["mods.ini", os.path.join("mods", "HitmanCoop.ini")]
+        keep += ["mods.ini", os.path.join("mods", "HitmanCoop.ini"), "thumbs.dat"]
         for rel in keep:
             src = os.path.join(self.retail, rel)
             if os.path.exists(src):
@@ -138,6 +140,15 @@ class Game:
                 rel = os.path.relpath(os.path.join(d, n), payload)
                 os.makedirs(os.path.dirname(os.path.join(self.retail, rel)), exist_ok=True)
                 shutil.copy2(os.path.join(d, n), os.path.join(self.retail, rel))
+        # 0.13.96: the game's own settings file tuned as the setup tunes it (restore() puts the
+        # game's file back): the game must start and play with it.
+        thumbs = os.path.join(self.retail, "thumbs.dat")
+        self.thumbs_tuned = False
+        if os.path.exists(thumbs):
+            plain, ok = gamecfg.decrypt(open(thumbs, "rb").read())
+            if ok and b"OnlineDisableAutoReconnect=1" in plain:
+                open(thumbs, "wb").write(gamecfg.encrypt(plain.replace(b"OnlineDisableAutoReconnect=1", b"OnlineDisableAutoReconnect=0")))
+                self.thumbs_tuned = True
         ini = os.path.join(self.retail, "mods.ini")
         text = open(ini, encoding="utf-8", errors="replace").read() if os.path.exists(ini) else ""
         if not re.search(r"^\s*\[HitmanCoop\]\s*$", text, re.I | re.M):
@@ -190,7 +201,7 @@ class Game:
         return "HITMAN3.exe" in out
 
     def launch(self):
-        for name in (self.cmd, self.status_path, self.cmd + ".trace", self.cmd + ".crash"):
+        for name in (self.cmd, self.status_path, self.cmd + ".trace", self.cmd + ".crash", self.cmd + ".crash.caught"):
             if os.path.exists(name):
                 os.remove(name)
         env = dict(os.environ, SteamAppId=STEAM_APP_ID, SteamGameId=STEAM_APP_ID)
@@ -394,6 +405,9 @@ def scenario_smoke(g, r, ctx):
     r.check("log lines carry date, game time, level and category", re.match(r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} +[+-]\d+\.\d\d  (INFO|WARN|ERROR|DEBUG|TRACE) ", log[0] if log else "") is not None,
             log[0][:120] if log else "(no log)")
     r.check("the log is at debug level for testing", s.get("log", {}).get("level") == "DEBUG", s.get("log"))
+    files = last_line(log[:25], r"game files:")
+    r.check("the game starts with its settings file tuned for co-op, and the mod sees it", getattr(g, "thumbs_tuned", False) and
+            "tuned for co-op" in (files or ""), (files or "")[-120:])
 
     # 0.13.95: the watch on Steam and IOI's servers, and the update signature check, in the game.
     s0 = len(g.log())
@@ -479,6 +493,40 @@ def scenario_npc(g, r, ctx):
     perf = last_line(log, r"perf +\|")
     r.metrics["perf"] = (perf or "")[40:]
     r.check("no 'AI isn't being skipped' warning", "ISN'T BEING SKIPPED" not in (perf or ""), (perf or "")[-200:])
+
+    # 0.13.96: world pins. Every puppet's skeleton is held where the bot's game has it. First as
+    # things are, then with every puppet's body put down turned by 90 degrees on purpose: the pins
+    # must turn each one back by that much (and the screenshot must look like the first one).
+    # pins: NPCs, put right, max, <10, 10-45, 45-80, 80-100, 100+, already right, unusable
+    pin_rx = (r"pins: (\d+) NPCs, (\d+) poses put right \(up to (\d+) deg; by angle <10:(\d+) 10-45:(\d+) 45-80:(\d+) 80-100:(\d+) 100\+:(\d+)\), "
+              r"(\d+) already right, (\d+) unusable")
+    line = g.wait_log(r"perf +\|.*pins: ", 25, len(g.log()))
+    pins = numbers(line, pin_rx)
+    r.metrics["pins (walking)"] = (line or "")[-230:]
+    total = (pins[1] + pins[8] + pins[9]) if pins else 0
+    r.check("pins: puppets are pinned, the engine's world matrix is recognised, few poses unusable (under 10%)",
+            pins is not None and pins[0] > 0 and pins[9] < 0.1 * total and "not recognised" not in (line or ""), (line or "")[-230:])
+    # 47 next to the bot's puppets, for a look at them.
+    spot = numbers(g.status().get("shared", ""), r"partner at (-?[\d.]+) (-?[\d.]+) (-?[\d.]+)")
+    if spot:
+        g.command("goto {:.1f} {:.1f} {:.1f} {:.1f} {:.1f}".format(spot[0] + 4, spot[1] + 4, spot[2], spot[0], spot[1]))
+        time.sleep(3)
+    g.shot("pins-on")
+    g.command("pins yaw 90")
+    time.sleep(3)
+    line = g.wait_log(r"perf +\|.*pins: ", 25, len(g.log()))
+    pins = numbers(line, pin_rx)
+    r.metrics["pins (bodies turned 90 deg)"] = (line or "")[-230:]
+    r.check("pins: bodies put down turned by 90 degrees are turned back by 80-100 degrees (most corrections)",
+            pins is not None and pins[1] > 0 and pins[6] > 0.8 * pins[1], (line or "")[-230:])
+    g.shot("pins-on-turned-90")
+    g.command("pins off")
+    time.sleep(2)
+    g.shot("pins-off-turned-90")
+    g.command("pins on")
+    g.command("pins yaw 0")
+    time.sleep(1)
+    r.check("no crash with the pins", g.running())
 
     p.send("npcstill")
     time.sleep(12)
@@ -608,6 +656,80 @@ def scenario_restart(g, r, ctx):
     r.check("no crash on restart", g.running() and not os.path.exists(g.cmd + ".crash"))
     r.check("the log has the restart", g.wait_log(r"together in the mission", 10, start) is not None)
     g.shot("after-restart")
+
+
+def scenario_extras(g, r, ctx):
+    """0.13.96, in a mission with the bot: the flight recorder, the guarded calls, held items given
+    to the stand-in over and over (the rifle crash), the script sync's list, NPC ids, game files."""
+    if not g.status() or not g.status().get("synced"):
+        r.check("extras needs the npc scenario first", False)
+        return
+    start = len(g.log())
+    log = g.log()
+    r.check("the log says how the game's settings file stands", last_line(log[:25], r"game files: thumbs\.dat") is not None,
+            (last_line(log[:25], "game files:") or "")[-140:])
+    names = numbers(last_line(log[:25], "crash reports:"), r"crash reports: (\d+) of the mod's functions")
+    r.check("crash reports can name the mod's functions", names is not None and names[0] > 1000, last_line(log[:25], "crash reports:"))
+
+    # A fault inside a guarded call: caught, the game goes on, and it is in the crash file as caught.
+    g.command("guardtest")
+    time.sleep(2)
+    crash = g.cmd + ".crash.caught"
+    text = open(crash, encoding="utf-8", errors="replace").read() if os.path.exists(crash) else ""
+    r.check("a fault in a guarded call is caught and the game goes on", g.running() and "caught by the mod" in text and "guardtest" in text, text[:200])
+    r.check("the report names the mod's function and what the mod was doing", "FaultForTest" in text and "the mod was in:" in text and "code:" in text,
+            [l for l in text.splitlines() if "hitmancoop" in l.lower()][:2])
+
+    # Items for the stand-in: given, taken, given again, hand and back (the 0.13.95 rifle crash was
+    # the second give after a take). What 47 has on him is used.
+    for i in range(4):
+        g.command("standinitem 0 1 mine")
+        time.sleep(2.5)
+        g.command("standinitem 3 1 mine")
+        time.sleep(2.5)
+        g.command("standinitem 0 1 off")
+        g.command("standinitem 3 1 off")
+        time.sleep(1.0)
+    held = [l for l in g.log()[start:] if "stand-in" in l]
+    r.metrics["stand-in items"] = [l.split("| ", 1)[-1][:90] for l in held[-4:]]
+    r.check("the stand-in is given and relieved of items again and again without a crash", g.running() and
+            sum("in the stand-in's hand" in l or "on the stand-in's back" in l for l in held) >= 4 and not any("faulted" in l for l in held), len(held))
+
+    # The flight recorder: holds the detail the log leaves out, and saves.
+    g.command("blackbox")
+    time.sleep(1.5)
+    box = g.cmd + ".blackbox.txt"
+    lines = open(box, encoding="utf-8", errors="replace").read().splitlines() if os.path.exists(box) else []
+    cats = {l[26:36].strip() for l in lines if len(l) > 38}
+    r.metrics["flight recorder"] = f"{len(lines)} lines, categories {sorted(cats)[:14]}"
+    r.check("the flight recorder saves, with more than the log has", len(lines) > 100 and {"standin", "npctable"} <= cats, sorted(cats)[:12])
+    stale = [l for l in lines if "stale refs cleared" in l]
+    cleared = [numbers(l, r"\((-?\d+) stale refs cleared") for l in stale]
+    r.metrics["stale item references cleared"] = [int(c[0]) for c in cleared if c][:8]
+    # (Usually the game lets go of everything itself, and there is nothing left to clear: 0.)
+    r.check("taking an item from the stand-in looks through what the game still holds of it (its memory as expected)",
+            len(cleared) > 0 and all(c and c[0] >= 0 for c in cleared), stale[:2])
+
+    # The level's interactions, for the script sync, and NPCs by repository id.
+    s0 = len(g.log())
+    g.command("script list 6")
+    g.command("pins")
+    time.sleep(2)
+    out = g.log()[s0:]
+    sc = numbers(last_line(out, r"interactions watched"), r"(\d+) interactions watched, (\d+) of a shared kind")
+    r.metrics["script sync"] = (last_line(out, r"interactions watched") or "")[-170:]
+    r.check("the level's interactions are found for the script sync", sc is not None and sc[0] > 5 and sc[1] > 0, sc)
+    # 47 used nothing all this time: the level's own pins (its "use" prompts repeat one all the
+    # time) must never have been told to the partner as his doing.
+    told = numbers(last_line(out, r"interactions watched"), r"pins seen, (\d+) told")
+    rep = numbers(last_line(out, r"interactions watched"), r"(\d+) repeating")
+    r.check("the script sync tells nothing while 47 uses nothing (the level's repeating pins are recognised)",
+            told is not None and told[0] == 0 and rep is not None and rep[0] > 0, (last_line(out, r"interactions watched") or "")[-170:])
+    ids = numbers(last_line(out, r"known by repository id"), r"(\d+) of (\d+) NPCs known by repository id")
+    r.metrics["NPC ids"] = (last_line(out, r"known by repository id") or "")[-90:]
+    r.check("NPCs are known by repository id (for claims from the game's own events)", ids is not None and ids[0] > 0, ids)
+    r.check("still running", g.running())
+    g.shot("extras")
 
 
 def scenario_netsim(r, ctx):
@@ -767,6 +889,11 @@ def scenario_installers(r, ctx):
             open(os.path.join(retail, "ZHMModSDK.dll"), "wb").write(b"their loader")
             open(os.path.join(retail, "mods", "Other.dll"), "wb").write(b"their mod")
             open(os.path.join(retail, "mods.ini"), "w").write("[sdk]\n[Other]\n")
+            # 0.13.96: a settings file as the game ships it (3.290.1: with the line; 3.280.0: without).
+            thumbs = os.path.join(retail, "thumbs.dat")
+            shipped = b"# System config file for the engine\r\n\r\n[application]\r\nForceVSync=0\r\n" + \
+                (b"OnlineDisableAutoReconnect=1\r\n" if version == "3.290.1" else b"") + b"NO_RESOURCEDB=1\r\n\r\n[Hitman5]\r\nusegamecontroller=1\r\n"
+            open(thumbs, "wb").write(gamecfg.encrypt(shipped))
             before = {os.path.relpath(os.path.join(d, n), retail): sha(os.path.join(d, n)) for d, _, fs in os.walk(retail) for n in fs}
             log = os.path.join(root, "setup-" + version + ".log")
 
@@ -778,6 +905,13 @@ def scenario_installers(r, ctx):
             r.check(f"installers: setup, game {version}: the {folder} build goes in", out.returncode == 0 and
                     sha(os.path.join(retail, "ZHMModSDK.dll")) == sha(os.path.join(stage, folder, "ZHMModSDK.dll")) and
                     sha(os.path.join(retail, "mods", "HitmanCoop.dll")) == sha(os.path.join(stage, folder, "mods", "HitmanCoop.dll")), said)
+            tuned, ok = gamecfg.decrypt(open(thumbs, "rb").read())
+            kept = os.path.join(retail, "thumbs.dat.before-hitmancoop")
+            r.check(f"installers: setup, game {version}: the game's settings file is tuned, still valid, and the original kept",
+                    ok and b"OnlineDisableAutoReconnect=0\r\n" in tuned and b"OnlineDisableAutoReconnect=1" not in tuned and
+                    tuned.replace(b"OnlineDisableAutoReconnect=0\r\n", b"OnlineDisableAutoReconnect=1\r\n" if version == "3.290.1" else b"") == shipped and
+                    os.path.exists(kept) and gamecfg.decrypt(open(kept, "rb").read())[0] == shipped, tuned[-120:])
+            r.check(f"installers: setup, game {version}: the mod's function names are installed", os.path.getsize(os.path.join(retail, "mods", "HitmanCoop.sym")) > 50000)
             # An "older version" of ours in place, then the update over it: the backup must still hold
             # their loader only.
             open(os.path.join(retail, "mods", "HitmanCoop.dll"), "wb").write(b"our older version")
@@ -790,6 +924,11 @@ def scenario_installers(r, ctx):
             after = {os.path.relpath(os.path.join(d, n), retail): sha(os.path.join(d, n)) for d, _, fs in os.walk(retail) for n in fs if not n.startswith("HitmanCoop-install")}
             r.check(f"installers: setup, game {version}: uninstall puts it back as it was", out3.returncode == 0 and after == before,
                     sorted(set(after.items()) ^ set(before.items()))[:4])
+            # Asked not to touch the game's settings: not touched.
+            out4 = run("--no-game-tweaks")
+            r.check(f"installers: setup, game {version}: --no-game-tweaks leaves the game's settings file alone", out4.returncode == 0 and
+                    sha(thumbs) == before["thumbs.dat"] and not os.path.exists(kept))
+            run("--uninstall", "--remove-settings")
 
     wsl = shutil.which("wsl.exe") or shutil.which("wsl")
     if not wsl:
@@ -814,7 +953,7 @@ def scenario_installers(r, ctx):
         r.check(f"installers: Linux, game {version}: uninstall leaves only the game", out.returncode == 0 and left == ["HITMAN3.exe"], left[:5])
 
 
-GAME_SCENARIOS = {"smoke": scenario_smoke, "npc": scenario_npc, "bodies": scenario_bodies, "bodyprobe": scenario_bodyprobe, "restart": scenario_restart}
+GAME_SCENARIOS = {"extras": scenario_extras, "smoke": scenario_smoke, "npc": scenario_npc, "bodies": scenario_bodies, "bodyprobe": scenario_bodyprobe, "restart": scenario_restart}
 SCENARIOS = list(GAME_SCENARIOS) + ["netsim", "installers"]
 
 
@@ -885,15 +1024,21 @@ def main():
         finally:
             ctx["partner"].stop()
             closed = g.close()
+            # Put the game folder back first: nothing after this may stop that (a locked report
+            # file once did, and the next run backed up the tested build as "the original").
+            if not a.keep:
+                g.restore()
             r.check("the game closes cleanly", closed == "closed", closed)
             r.check("no crash report", not os.path.exists(g.cmd + ".crash") and not os.path.exists(os.path.join(g.mods, "HitmanCoop-crash.txt")))
             for name in ("HitmanCoop.log", "HitmanCoop-crash.txt"):
                 if os.path.exists(os.path.join(g.mods, name)):
                     shutil.copy2(os.path.join(g.mods, name), results)
-            if os.path.exists(g.cmd + ".crash"):
-                shutil.copy2(g.cmd + ".crash", results)
-            if not a.keep:
-                g.restore()
+            for name in (g.cmd + ".crash", g.cmd + ".crash.caught"):
+                if os.path.exists(name):
+                    try:
+                        shutil.copy2(name, results)
+                    except OSError as e:
+                        r.note(f"couldn't copy {os.path.basename(name)}: {e}")
 
     passed, total = r.write()
     print(f"{passed} of {total} checks passed: {os.path.join(results, 'report.md')}", flush=True)

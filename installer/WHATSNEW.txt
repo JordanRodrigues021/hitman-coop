@@ -1,3 +1,29 @@
+HITMAN Co-op 0.14.0
+
+A milestone release: everything from the 0.13.9x betas below, plus this. Both players need 0.14.0
+(it doesn't connect to 0.13.x). Coming from 0.13.2? Read on past this section: there is a lot.
+
+Logs: a new way of finding bugs
+- Until now the log only held what the log level allowed, so the moments before a bug or crash were usually missing. 0.14.0 adds a flight recorder: the mod keeps the last several thousand detailed events in memory all the time, whatever the log level (every NPC that changed hands between the two games and why, every event of the game, every scripted step of the mission, items given to your partner's stand-in, the NPCs around you every 20 seconds). It is written out with every crash and into every bug report (HitmanCoop-blackbox.txt). One bug report from each player is now enough to replay what both games did, side by side, without anyone turning on verbose logging and trying again.
+- Crash reports name the mod's own functions, show the exact instruction that failed and what the mod was doing at that moment, and end with the last 40 events. A crash dump stays on your PC (only send it if asked; [log] crash_dump = false turns it off).
+- Faults the mod catches and survives are written down separately, so they are fixed even when nobody noticed them.
+- Bug reports also include the mod loader's own log. CO-OP > About > Copy diagnostics has lines for every new system below.
+
+Crashes
+- The guest's game crashed when the host drew a rifle or another two-handed weapon: the game kept pointing at the stand-in's last item after the mod took it away. Those leftovers are cleared now, and if the game ever faults handing the stand-in an item, the mod catches it and the stand-in simply carries nothing until the next mission.
+- The guest's game crashed when the host left for the main menu: the mod took that for "restart mission" and restarted the guest's mission in the middle of putting the stand-in away. Leaving for the menus is no longer a restart, a restart made for your partner waits until the stand-in has settled, and a new guard ("restart guard 4") covers the exact place in the game that went down.
+
+NPCs
+- NPCs walking one way and facing another (moonwalking, sliding sideways) on the guest's screen: an NPC your partner's game runs still follows its own last orders in your game, which turned its body after the mod had placed it. Every such NPC's skeleton is now pinned to where and how it stands in your partner's game, every frame, whatever its body does underneath.
+- A guard who heard something, got a "?" over his head and then stood there for good: the noise was only in the game of the player who made it, while the other game ran the guard. NPCs in earshot of something you throw are now run by your game while they look into it, and so is any NPC your game's own AI starts something with (comes to look, spots you, turns sick).
+- An NPC that is searching, agitated or alarmed no longer changes hands between the two games because a player walked closer; it stays with the game it is searching in until it is calm again.
+
+Missions
+- Mission scripts now advance in both games. When you use something the mission's script waits for (sign a paper, sabotage a machine, pour a drink), your partner's game is told and does the same step, so the target reacts and the objective moves on for both of you. Before, only your own game knew, and the mission could get stuck (a target who never spoke again after the NDA was signed). Doors, items, disguises and bodies keep their own sync. [sync] scripted_actions = false in HitmanCoop.ini turns this off.
+
+The game's own files
+- The setup now tunes the game itself for co-op: in the game's settings file (Retail\thumbs.dat) it lets HITMAN reconnect to IOI's servers by itself when the connection drops, instead of stopping the mission with a "connection lost" box that froze both players. The file as it was is kept beside it, the setup has a tick box for it, uninstalling puts it back, and after a game update the mod makes the change again by itself.
+
 HITMAN Co-op 0.13.95 (beta)
 
 Install and antivirus

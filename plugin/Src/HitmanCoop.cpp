@@ -1,6 +1,9 @@
 #include "HitmanCoop.h"
 #include "CoopText.h"
 #include "CrashTrace.h"
+#include "BlackBox.h"
+#include "GameTweaks.h"
+#include "WorldScript.h"
 #include "CrashGuards.h"
 #include "GamePause.h"
 #include "Log.h"
@@ -66,6 +69,18 @@ static std::string ToLowerCopy(std::string p_Value) {
 
 HitmanCoop::HitmanCoop() = default;
 
+// Reads through a null pointer, under SEH: true when the fault was caught (the test channel's
+// guardtest: the crash handler must report it as one the mod caught, and the game goes on).
+static bool FaultForTest() noexcept {
+    __try {
+        volatile int* s_Null = nullptr;
+        return *s_Null == 12345;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return true;
+    }
+}
+
 std::string HitmanCoop::ModsFolder() {
     char s_Exe[MAX_PATH] {};
     GetModuleFileNameA(nullptr, s_Exe, MAX_PATH);
@@ -88,6 +103,7 @@ void HitmanCoop::LogPerf(double p_Now, double p_FrameGap, double p_ModMs) {
         w = {};
         w.since = p_Now;
         w.skippedThinks = CrashGuards::SkippedThinks();
+        w.emptySlots = CrashGuards::EmptySlots();
         return;
     }
 
@@ -108,18 +124,36 @@ void HitmanCoop::LogPerf(double p_Now, double p_FrameGap, double p_ModMs) {
     const uint32_t s_Skipped = CrashGuards::SkippedThinks();
     const uint32_t s_SkippedNow = s_Skipped - w.skippedThinks;
     const size_t s_Puppets = CrashGuards::PuppetCount();
+    const PoseHook::PinStats s_Pins = PoseHook::TakePinStats();
+    char s_PinText[320] = "";
+
+    // The world pins (PoseHook.h): how many puppets' skeletons had to be turned or shifted back
+    // to where the partner's game has them, and by how much at most.
+    if (s_Pins.pinned || s_Pins.corrected || s_Pins.unusable)
+        std::snprintf(s_PinText, sizeof(s_PinText), " | pins: %u NPCs, %u poses put right (up to %.0f deg; by angle <10:%u 10-45:%u 45-80:%u 80-100:%u 100+:%u), %u already right, %u unusable%s",
+            s_Pins.pinned, s_Pins.corrected, s_Pins.maxAngle, s_Pins.angles[0], s_Pins.angles[1], s_Pins.angles[2], s_Pins.angles[3], s_Pins.angles[4],
+            s_Pins.aligned, s_Pins.unusable,
+            s_Pins.layout == 0 ? ", world matrix not recognised yet" : PoseHook::PinsOn() ? "" : ", switched off");
 
     if (CoopLog::On(coop::LogLevel::Info) && w.frames > 0)
         CoopLog::Fmt(coop::LogLevel::Info, "perf",
             "%.0f fps (frames %.1f ms on average, the slowest %.0f ms), the mod %.2f ms a frame (the slowest %.1f ms)%s | in a mission: %s, "
-            "%zu puppets, their AI skipped %u times%s",
+            "%zu puppets, their AI skipped %u times%s%s",
             w.frames / s_Span, w.frameSum / w.frames * 1000.0, w.frameMax * 1000.0, w.modSum / w.frames, w.modMax,
             m_SlowMode ? ", slow-PC mode" : "", m_World.IsInScene() ? "yes" : "no", s_Puppets, s_SkippedNow,
-            s_Puppets > 0 && s_SkippedNow == 0 ? " (PUPPETS' AI ISN'T BEING SKIPPED: they run their own AI against the partner's positions)" : "");
+            s_Puppets > 0 && s_SkippedNow == 0 ? " (PUPPETS' AI ISN'T BEING SKIPPED: they run their own AI against the partner's positions)" : "",
+            s_PinText);
+
+    const uint32_t s_Empty = CrashGuards::EmptySlots();
+
+    if (s_Empty != w.emptySlots)
+        CoopLog::Fmt(coop::LogLevel::Warn, "guard", "restart guard 4 stepped in %u times: the game asked for an actor a restart had taken out (it would have crashed)",
+            s_Empty - w.emptySlots);
 
     w = {};
     w.since = p_Now;
     w.skippedThinks = s_Skipped;
+    w.emptySlots = s_Empty;
 }
 
 std::string HitmanCoop::BugReportResult() const {
@@ -153,9 +187,23 @@ void HitmanCoop::SaveBugReport(const std::string& p_Diagnostics) {
 
     CoopLog::Info("report", std::string("bug report saved: ") + s_Stamp);
 
-    for (const char* s_Name : { "HitmanCoop.log", "HitmanCoop-previous.log", "HitmanCoop-crash.txt", "HitmanCoop-crash-previous.txt" }) {
+    for (const char* s_Name : { "HitmanCoop.log", "HitmanCoop-previous.log", "HitmanCoop-crash.txt", "HitmanCoop-crash-previous.txt", "HitmanCoop-crash-caught.txt",
+             "HitmanCoop-blackbox-crash.txt", "HitmanCoop-blackbox-crash-previous.txt" }) {
         if (fs::exists(s_Mods + s_Name, s_Error))
             fs::copy_file(s_Mods + s_Name, s_Folder / s_Name, fs::copy_options::overwrite_existing, s_Error);
+    }
+
+    // The flight recorder as it is now: the detail of the last minutes, whatever the log level.
+    BlackBox::Save((s_Folder / "HitmanCoop-blackbox.txt").string());
+
+    // The mod loader's own log (Retail\ZHMModLoader.log): what loaded, and what it complained about.
+    if (std::ifstream s_In(fs::path(s_Mods).parent_path() / "ZHMModLoader.log"); s_In) {
+        std::ofstream s_Out(s_Folder / "ZHMModLoader.log");
+        std::string s_Line;
+        size_t s_Lines = 0;
+
+        while (std::getline(s_In, s_Line) && ++s_Lines < 20000)
+            s_Out << CoopLog::MaskAddresses(s_Line) << '\n';
     }
 
     {
@@ -256,6 +304,9 @@ void HitmanCoop::Init() {
     Hooks::ZLevelManager_SetGameState->AddDetour(this, &HitmanCoop::OnSetGameState);
     Hooks::ZGameUIManagerEntity_TryOpenMenu->AddDetour(this, &HitmanCoop::OnTryOpenMenu);
     Hooks::ZApplicationEngineWin32_OnMainWindowActivated->AddDetour(this, &HitmanCoop::OnWindowActivated);
+    // The script sync (WorldScript.h). [sync] scripted_actions = false: watched, never shared.
+    WorldScript::SetShared(GetSettingBool("sync", "scripted_actions", true));
+    Hooks::SignalOutputPin->AddDetour(this, &HitmanCoop::OnSignalOutputPin);
     m_World.m_EventHook = [this](const std::string& p_Name, const std::string& p_Json) { return OnTeamEvent(p_Name, p_Json); };
 
     if (m_Test.Enabled()) {
@@ -285,7 +336,13 @@ void HitmanCoop::Init() {
             m_PreviousCrash = "mods\\HitmanCoop-crash-previous.txt";
     }
 
+    // The flight recorder a crash left behind is kept beside its report, as the report is.
+    std::filesystem::rename(s_Dir + "HitmanCoop-blackbox-crash.txt", s_Dir + "HitmanCoop-blackbox-crash-previous.txt", s_Error);
+    std::filesystem::rename(s_Dir + "HitmanCoop-crash.dmp", s_Dir + "HitmanCoop-crash-previous.dmp", s_Error);
+    s_Error.clear();
+
     CoopLog::SetGameClock(&HitmanCoop::Now);
+    BlackBox::SetClock(&HitmanCoop::Now);
     CoopLog::Open(m_LogPath, s_Dir + "HitmanCoop-previous.log");
 
     // Testing: the trace file gets every log line too (and the heartbeat, see OnFrameUpdate).
@@ -294,7 +351,10 @@ void HitmanCoop::Init() {
 
     m_World.SetTrace([](const std::string& p_Line) { CoopLog::Tagged(coop::LogLevel::Info, p_Line); });
     const std::string s_CrashHeader = "HITMAN Co-op " + std::string(c_ModVersion) + " (" + c_BuildMark + "), game " + m_GameVersion;
-    CrashTrace::Install(m_Test.Enabled() ? m_Test.Path() + ".crash" : s_Crash, s_CrashHeader);
+    // [log] crash_dump = false: no minidump beside the crash report (it holds the game's memory).
+    m_CrashDump = GetSettingBool("log", "crash_dump", true);
+    CrashTrace::Install(m_Test.Enabled() ? m_Test.Path() + ".crash" : s_Crash, s_CrashHeader,
+        m_Test.Enabled() ? m_Test.Path() + ".blackbox" : s_Dir + "HitmanCoop-blackbox-crash.txt", s_Dir + "HitmanCoop-crash.dmp", m_CrashDump);
     WriteLogHeader(s_Patches);
 }
 
@@ -351,6 +411,10 @@ void HitmanCoop::WriteLogHeader(int p_Patches) {
     }
 
     CoopLog::Fmt(LogLevel::Info, "start", "game patches: %d of %d (%s)", p_Patches, CrashGuards::Count(), CrashGuards::Report().c_str());
+    // The game's own settings file, as the setup tuned it (made again here after a game update).
+    CoopLog::Fmt(LogLevel::Info, "start", "game files: %s", GameTweaks::CheckAndHeal(s_Game).c_str());
+    CoopLog::Fmt(LogLevel::Info, "start", "crash reports: %zu of the mod's functions can be named%s, a crash dump is %s", CrashTrace::SymbolCount(),
+        CrashTrace::SymbolCount() ? "" : " (HitmanCoop.sym is missing: addresses only)", m_CrashDump ? "kept beside the report" : "off");
 
     // The settings as saved (HitmanCoop.ini), one line.
     {
@@ -1552,8 +1616,13 @@ void HitmanCoop::OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent) {
 
         const float s_Dt = static_cast<float>(std::min(p_UpdateEvent.m_RealTimeDelta.ToSeconds(), 0.25));
 
+        // NPCs in earshot of something our 47 threw are ours to run while they look into it.
+        for (const uint64_t s_Id : m_World.TakeNoiseClaims())
+            m_Session->ClaimNpc(s_Id, s_Now, 30.0, "heard something our 47 threw");
+
         // Whatever goes wrong in the session (out of memory, a bug), the game goes on without it.
         try {
+            const BlackBox::Scope s_Section("the session's tick");
             m_Session->Tick(s_Now, s_Dt);
         }
         catch (const std::exception& s_Error) {
@@ -1884,6 +1953,30 @@ void HitmanCoop::RunTestChannel(double p_Now) {
             m_Test.Trace(m_World.HeldItemsTest());
         else if (s_Verb == "standinitem")
             m_Test.Trace(m_World.StandInItemTest(s_Arg));
+        else if (s_Verb == "script")
+            m_Test.Trace(m_World.ScriptTest(s_Arg));
+        else if (s_Verb == "pins")
+            m_Test.Trace(m_World.PinTest(s_Arg));
+        else if (s_Verb == "goto")
+            m_Test.Trace(m_World.GotoTest(s_Arg));
+        // blackbox: the flight recorder written beside the trace file, and how much it holds.
+        else if (s_Verb == "blackbox") {
+            const bool s_Saved = BlackBox::Save(m_Test.Path() + ".blackbox.txt");
+            char s_Text[160];
+            std::snprintf(s_Text, sizeof(s_Text), "blackbox: %zu entries over %.0f s, %s; crash report names %zu functions", BlackBox::Count(),
+                BlackBox::Span(), s_Saved ? "saved" : "NOT saved", CrashTrace::SymbolCount());
+            m_Test.Trace(s_Text);
+        }
+        // guardtest: a fault inside a guarded call, as the game faulting under the mod would be.
+        else if (s_Verb == "guardtest") {
+            const int s_Before = CrashTrace::CaughtFaults();
+            bool s_Caught = false;
+            {
+                const BlackBox::Guarded s_Guard("the test channel's guardtest");
+                s_Caught = FaultForTest();
+            }
+            m_Test.Trace(std::string("guardtest: ") + (s_Caught && CrashTrace::CaughtFaults() == s_Before + 1 ? "caught and reported" : "NOT caught"));
+        }
         else if (s_Verb == "body")
             m_Test.Trace(m_World.BodyTest(s_Arg));
         else if (s_Verb == "bodymove")
@@ -2259,6 +2352,23 @@ void HitmanCoop::OnMissionRestarted(const std::string& p_Scene) {
     }
 }
 
+// Every output pin any entity signals, on whatever thread: all but the level's interactions are
+// turned away at once (WorldScript.h).
+DEFINE_PLUGIN_DETOUR(HitmanCoop, bool, OnSignalOutputPin, ZEntityRef p_Entity, uint32_t p_PinId, const ZObjectRef& p_Data) {
+    const bool s_HasData = !p_Data.IsEmpty();
+    const char* s_Type = s_HasData && p_Data.GetTypeID() && p_Data.GetTypeID()->GetTypeInfo() ? p_Data.GetTypeID()->GetTypeInfo()->pszTypeName : nullptr;
+    const WorldScript::ValueKind s_Kind = s_HasData ? WorldScript::KindOf(s_Type) : WorldScript::Value_None;
+    uint32_t s_Bits = 0;
+
+    if (s_Kind == WorldScript::Value_Bool)
+        s_Bits = *static_cast<const uint8_t*>(p_Data.GetData()) ? 1 : 0;
+    else if (s_Kind != WorldScript::Value_None && s_Kind != WorldScript::Value_Other && p_Data.GetData())
+        std::memcpy(&s_Bits, p_Data.GetData(), sizeof(s_Bits));
+
+    WorldScript::OnOutputPin(p_Entity.m_pObj, p_PinId, s_Kind, s_Bits, s_Type);
+    return HookResult<bool>(HookAction::Continue());
+}
+
 DEFINE_PLUGIN_DETOUR(HitmanCoop, void, OnClearScene, ZEntitySceneContext* th, bool p_FullyUnloadScene) {
     std::lock_guard s_Lock(m_SessionMutex);
 
@@ -2268,11 +2378,14 @@ DEFINE_PLUGIN_DETOUR(HitmanCoop, void, OnClearScene, ZEntitySceneContext* th, bo
     // A restart already told (by its ContractFailed event) is not looked for again.
     const bool s_InMission = m_World.IsInScene() && SdkWorld::IsMissionScene(m_World.CurrentScene().scene) && !m_RestartTold;
     m_RestartTold = false;
-    m_ClearedMission = s_InMission && p_FullyUnloadScene ? m_World.CurrentScene().scene : std::string();
+    // Either way the partner is told only once we are back in this same mission (OnFrameUpdate
+    // for one rebuilt in place, OnLoadScene for one loaded again). Leaving for the menus clears a
+    // mission just like a restart does, and telling it here restarted a guest's mission, and took
+    // their game down, when the host only left (0.13.95).
+    m_ClearedMission = s_InMission ? m_World.CurrentScene().scene : std::string();
     m_Test.Trace(std::string("scene: clearing (") + (p_FullyUnloadScene ? "full" : "for a rebuild") + ")");
-
-    if (s_InMission && !p_FullyUnloadScene)
-        OnMissionRestarted(m_World.CurrentScene().scene);
+    BlackBox::Note("scene", "clearing %s (%s), in mission %d", m_World.CurrentScene().scene.c_str(), p_FullyUnloadScene ? "full" : "rebuild",
+        s_InMission ? 1 : 0);
 
     if (m_Session && m_World.IsInScene())
         m_Session->OnLocalSceneUnloaded();
@@ -2384,6 +2497,22 @@ DEFINE_PLUGIN_DETOUR(
 
         if (s_Name == "Pacify" || s_Name == "Kill")
             m_World.NotePacified(s_Json, s_Name == "Pacify");
+
+        // Every event of our own game, in the flight recorder (the start of it: who, what).
+        {
+            const size_t s_Value = s_Json.find("\"Value\"");
+            BlackBox::Note("event", "%s %.150s", s_Name.c_str(), s_Value == std::string::npos ? "" : s_Json.c_str() + s_Value);
+        }
+
+        // Our game's AI started something with an NPC (it comes to look at a noise, it spotted
+        // our 47, it turned sick): that goes on in our game only, so ours runs the NPC for the
+        // length of it. Run by the partner's game it stood where it was, a "?" over its head.
+        if (s_Connected && m_Session->Synced() && !c_PartnerKillEvents.contains(s_Name) && s_Name != "Kill" && s_Name != "Pacify") {
+            for (const uint64_t s_Id : m_World.NpcsNamedIn(s_Json)) {
+                const std::string s_Why = "is in our game's " + s_Name;
+                m_Session->ClaimNpc(s_Id, Now(), 40.0, s_Why.c_str());
+            }
+        }
 
         // Ours to count and tell: not a kill made only to mirror the partner's game, nor one of the
         // game's hidden bookkeeping challenges.

@@ -15,7 +15,7 @@ namespace coop {
 // 10: player status (alerts, menus, mission stats), mark kinds, what a loading partner loads.
 // 11: the host's mod version in Welcome, a player's colour and "away" in their status.
 // 16: NPC poses carry only the bones that changed (MsgNpcPose); item and body rest places.
-constexpr uint32_t kProtocolVersion = 17;
+constexpr uint32_t kProtocolVersion = 18;
 
 constexpr uint16_t kDefaultPort = 47047;
 constexpr size_t kMaxPacketSize = 1200;
@@ -159,6 +159,9 @@ struct MsgSceneInfo {
 struct MsgNpcClaim {
     uint32_t epoch = 0;
     uint64_t id = 0;
+    // How long the claim is for, in tenths of a second (a hit: 3 s; an NPC looking into a noise
+    // its game heard: the length of an investigation).
+    uint16_t tenths = 30;
 
     void Write(ByteWriter& w) const;
     bool Read(ByteReader& r);

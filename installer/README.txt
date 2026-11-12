@@ -1,5 +1,5 @@
 =====================================================
-   HITMAN CO-OP 0.13.95
+   HITMAN CO-OP 0.14.0
    * created by Jordan Rodrigues *
 =====================================================
 
@@ -8,8 +8,8 @@ No IOI, Peacock, Steam or Epic servers are used: it works with the game online o
 
 INSTALL (both players, the same version)
   1. Close the game.
-  2. Run HitmanCoop-Setup-0.13.95.exe and click Install.
-     Prefer a zip? Extract all of HitmanCoop-0.13.95.zip and run
+  2. Run HitmanCoop-Setup-0.14.0.exe and click Install.
+     Prefer a zip? Extract all of HitmanCoop-0.14.0.zip and run
      HitmanCoop-Setup.exe from the extracted folder.
   3. Choose how you'll connect: a join code (nothing to set up) or Tailscale (a
      private network between your two PCs; the setup installs it, signs you in in
@@ -33,7 +33,7 @@ IF WINDOWS OR YOUR BROWSER WARNS ABOUT THE DOWNLOAD
   It installs the build for your game version: the current game (3.290.x), or
   3.280.x for players who can't update. Both players need the same game version.
 
-  On Linux / Steam Deck (Proton), extract HitmanCoop-0.13.95-linux.tar.gz (or the
+  On Linux / Steam Deck (Proton), extract HitmanCoop-0.14.0-linux.tar.gz (or the
   zip), open a terminal in that folder and run:
       bash installer.sh
   To remove it again:
@@ -62,6 +62,9 @@ WHAT IS SHARED
   - Your partner in the level, in their disguise, moving and animating like they do.
   - Items: one player takes an item, it's gone for the other; dropped, it reappears.
   - Doors: opened or closed by one player, for both.
+  - Mission steps: when one player uses something the mission waits for (signs a
+    paper, sabotages a machine, pours a drink), the other player's game does that
+    step too, so targets react and objectives move on for both.
   - NPC alert levels: guards alerted in one game are alerted in the other too. A
     partner's crime never makes your guards hunt or shoot you.
   - Mission complete / failed and target kills.
@@ -145,6 +148,9 @@ NEW IN 0.10
     diagnostics" for bug reports.
   - On a slow PC the mod does less work per frame by itself.
   - The previous session's log and crash report are kept (HitmanCoop-previous.log).
+  - A flight recorder: the last few thousand detailed events are kept in memory and
+    written out with every crash and bug report (HitmanCoop-blackbox.txt), so a
+    report shows what led up to a problem.
 
 NOT SHARED YET
   - Items in your partner's hands, and alarms.
@@ -188,11 +194,29 @@ TEST YOUR CONNECTION (no game needed)
   suspect for these errors in 0.13. CO-OP > About > Copy diagnostics shows the
   "Online" line (what happened to Steam and HITMAN's servers, and when).
 
+WHAT THE SETUP CHANGES IN THE GAME ITSELF
+  One line in the game's own settings file, Retail\thumbs.dat:
+  OnlineDisableAutoReconnect=0 (the game ships with 1). With it, HITMAN reconnects
+  to IOI's servers by itself when the connection drops, instead of stopping the
+  mission with a "connection lost" box that froze both players. The file as it was
+  is kept beside it (thumbs.dat.before-hitmancoop). Untick "Tune the game for
+  co-op" in the setup, or start it with --no-game-tweaks, to leave the file alone;
+  uninstalling puts it back. After a game update the mod makes the change again by
+  itself. Everything else the mod changes in the game it changes in memory while
+  the game runs, never on disk.
+
+BUG REPORTS AND CRASHES
+  CO-OP > About > Save bug report makes one zip with the logs, the flight recorder
+  and the diagnostics, on both PCs please. After a crash the mod also keeps
+  Retail\mods\HitmanCoop-crash.dmp on your PC. It holds the game's memory, so it
+  is never put into a bug report by itself: only send it if you are asked for it.
+  [log] crash_dump = false in HitmanCoop.ini turns it off.
+
 UNINSTALL
   Settings > Apps > HITMAN Co-op > Uninstall, or run the setup again and click
   Uninstall. On Linux, run "bash installer.sh --uninstall". The game folder is put back exactly
   as it was: the mod removed, a mod loader we added removed (kept if other mods
-  need it), one we replaced restored.
+  need it), one we replaced restored, the game's settings file as it was.
 
 HITMAN Co-op is (c) 2026 Jordan Rodrigues, free software under the GPL v3.
 It uses ZHMModSDK by OrfeasZ. Licenses are in the licenses folder.

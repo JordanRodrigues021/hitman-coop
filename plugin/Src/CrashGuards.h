@@ -53,6 +53,8 @@ namespace CrashGuards {
     uint32_t MutedLines();
     uint32_t AllLines(); // lines spoken by any actor (test)
     uint32_t SkippedThinks();
+    // Restart guard 4: how often the game asked the actor manager for an actor it no longer has.
+    uint32_t EmptySlots();
     void NoteCalmed(int32_t p_Wanted);
     // Test: where in HITMAN3.exe the calmed requests came from (return addresses, most frequent first).
     void NoteCalmedFrom(const void* const* p_Frames, int p_Count);

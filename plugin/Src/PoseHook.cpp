@@ -5,8 +5,12 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <mutex>
+#include <shared_mutex>
+
+#include <DirectXMath.h>
 
 namespace {
 // The pose update entry's arguments: (this, input pose, output pose, world matrix, then up to
@@ -46,6 +50,16 @@ std::vector<PoseHook::Bone> g_TargetNative; // the target's own pose, before our
 std::vector<uint8_t> g_TargetMask;          // bones of ours to use (empty: all)
 std::vector<int32_t> g_TargetMap; // per target bone, the source bone it copies (-1: its own; empty: same index)
 
+// World pins (see PoseHook.h): where each pinned character's skeleton must be, sorted by animator.
+std::shared_mutex g_PinMutex;
+std::vector<PoseHook::Pin> g_Pins;
+std::atomic<uint32_t> g_PinCount { 0 };
+std::atomic<bool> g_PinsOn { true };
+std::atomic<int> g_PinLayout { 0 }; // the world matrix argument: 0 not known yet, 1: 4x4 floats, 2: 4x3 floats
+std::atomic<uint32_t> g_PinCorrected { 0 }, g_PinAligned { 0 }, g_PinUnusable { 0 };
+std::atomic<uint32_t> g_PinMaxAngle { 0 }; // hundredths of a degree, since the stats were last read
+std::atomic<uint32_t> g_PinAngles[5] {};     // corrections by angle: <10, 10-45, 45-80, 80-100, 100+ degrees
+
 // Writes p_Rot over p_Bone's rotation, on the same side of the 4D sphere as the rotation already
 // there. q and -q are the same rotation, but the engine blends with the bone's own value, and our
 // sign-normalised copies (smallest-three packing) flipped an NPC upside down.
@@ -55,6 +69,133 @@ void WriteRotation(PoseHook::Bone& p_Bone, const float* p_Rot) {
 
     for (int i = 0; i < 4; ++i)
         p_Bone.rot[i] = p_Rot[i] * s_Sign;
+}
+
+bool FindPin(void* p_Animator, PoseHook::Pin& p_Out) {
+    std::shared_lock s_Lock(g_PinMutex);
+    const auto s_It = std::lower_bound(g_Pins.begin(), g_Pins.end(), p_Animator,
+        [](const PoseHook::Pin& p_Pin, void* p_Key) { return p_Pin.animator < p_Key; });
+
+    if (s_It == g_Pins.end() || s_It->animator != p_Animator)
+        return false;
+
+    p_Out = *s_It;
+    return true;
+}
+
+// The first 16 floats at the world matrix argument, under SEH (it is the engine's pointer).
+bool PeekWorld(const void* p_World, float* p_Out) noexcept {
+    __try {
+        std::memcpy(p_Out, p_World, 16 * sizeof(float));
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Three unit axes at right angles and a finite position: a character's world matrix.
+bool Rigid(const float p_Rows[4][3]) {
+    for (int i = 0; i < 4; ++i)
+        for (int k = 0; k < 3; ++k)
+            if (!std::isfinite(p_Rows[i][k]) || std::fabs(p_Rows[i][k]) > 1e6f)
+                return false;
+
+    const auto s_Dot = [&](int a, int b) { return p_Rows[a][0] * p_Rows[b][0] + p_Rows[a][1] * p_Rows[b][1] + p_Rows[a][2] * p_Rows[b][2]; };
+
+    for (int i = 0; i < 3; ++i)
+        if (std::fabs(s_Dot(i, i) - 1.f) > 0.05f)
+            return false;
+
+    return std::fabs(s_Dot(0, 1)) < 0.05f && std::fabs(s_Dot(0, 2)) < 0.05f && std::fabs(s_Dot(1, 2)) < 0.05f;
+}
+
+// The world matrix argument as rows (x, y, z axes, position), in the layout it has. Which layout
+// that is is found from the data itself, once, and kept: only a matrix that is rigid and within a
+// few metres of where the character was put counts, so a build that passes something else here
+// never moves a bone.
+bool WorldRows(const void* p_World, const PoseHook::Pin& p_Pin, float p_Rows[4][3]) {
+    float s_Raw[16];
+
+    if (!p_World || !PeekWorld(p_World, s_Raw))
+        return false;
+
+    const auto s_Try = [&](int p_Layout) {
+        const int s_Stride = p_Layout == 1 ? 4 : 3;
+
+        for (int i = 0; i < 4; ++i)
+            for (int k = 0; k < 3; ++k)
+                p_Rows[i][k] = s_Raw[i * s_Stride + k];
+
+        if (p_Layout == 1 && (std::fabs(s_Raw[3]) > 0.01f || std::fabs(s_Raw[7]) > 0.01f || std::fabs(s_Raw[11]) > 0.01f))
+            return false;
+
+        const float s_X = p_Rows[3][0] - p_Pin.pos[0], s_Y = p_Rows[3][1] - p_Pin.pos[1], s_Z = p_Rows[3][2] - p_Pin.pos[2];
+        return Rigid(p_Rows) && s_X * s_X + s_Y * s_Y + s_Z * s_Z < 36.f;
+    };
+
+    if (const int s_Known = g_PinLayout.load(std::memory_order_relaxed))
+        return s_Try(s_Known);
+
+    for (const int s_Layout : { 1, 2 }) {
+        if (s_Try(s_Layout)) {
+            g_PinLayout.store(s_Layout, std::memory_order_relaxed);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// Moves the root bone so the skeleton stands where the pin says, whatever the character's own
+// transform is this frame: root' = root * wanted * actual^-1 (row vectors, as the engine's).
+void ApplyPin(PoseHook::Bone& p_Root, const PoseHook::Pin& p_Pin, const void* p_World) {
+    using namespace DirectX;
+    float s_Rows[4][3];
+
+    if (!WorldRows(p_World, p_Pin, s_Rows)) {
+        g_PinUnusable.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    const XMMATRIX s_Actual = XMMatrixSet(s_Rows[0][0], s_Rows[0][1], s_Rows[0][2], 0.f, s_Rows[1][0], s_Rows[1][1], s_Rows[1][2], 0.f,
+        s_Rows[2][0], s_Rows[2][1], s_Rows[2][2], 0.f, s_Rows[3][0], s_Rows[3][1], s_Rows[3][2], 1.f);
+    XMMATRIX s_Wanted = XMMatrixRotationQuaternion(XMQuaternionNormalize(XMVectorSet(p_Pin.rot[0], p_Pin.rot[1], p_Pin.rot[2], p_Pin.rot[3])));
+    s_Wanted.r[3] = XMVectorSet(p_Pin.pos[0], p_Pin.pos[1], p_Pin.pos[2], 1.f);
+    XMVECTOR s_Det;
+    const XMMATRIX s_Fix = XMMatrixMultiply(s_Wanted, XMMatrixInverse(&s_Det, s_Actual));
+
+    // How far off the character's own transform is: nothing to do when it is where it should be.
+    const XMVECTOR s_FixRot = XMQuaternionNormalize(XMQuaternionRotationMatrix(s_Fix));
+    const float s_Angle = 2.f * std::acos(std::min(1.f, std::fabs(XMVectorGetW(s_FixRot))));
+    const float s_Off = XMVectorGetX(XMVector3Length(s_Fix.r[3]));
+
+    if (!std::isfinite(s_Angle) || !std::isfinite(s_Off))
+        return;
+
+    if (s_Angle < 0.004f && s_Off < 0.004f) {
+        g_PinAligned.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    XMMATRIX s_Bone = XMMatrixRotationQuaternion(XMQuaternionNormalize(XMVectorSet(p_Root.rot[0], p_Root.rot[1], p_Root.rot[2], p_Root.rot[3])));
+    s_Bone.r[3] = XMVectorSet(p_Root.pos[0], p_Root.pos[1], p_Root.pos[2], 1.f);
+    const XMMATRIX s_New = XMMatrixMultiply(s_Bone, s_Fix);
+    XMFLOAT4 s_Rot;
+    XMStoreFloat4(&s_Rot, XMQuaternionNormalize(XMQuaternionRotationMatrix(s_New)));
+    const float s_Q[4] = { s_Rot.x, s_Rot.y, s_Rot.z, s_Rot.w };
+    WriteRotation(p_Root, s_Q);
+    p_Root.pos[0] = XMVectorGetX(s_New.r[3]);
+    p_Root.pos[1] = XMVectorGetY(s_New.r[3]);
+    p_Root.pos[2] = XMVectorGetZ(s_New.r[3]);
+    g_PinCorrected.fetch_add(1, std::memory_order_relaxed);
+
+    const float s_Degrees = s_Angle * 57.29578f;
+    g_PinAngles[s_Degrees < 10.f ? 0 : s_Degrees < 45.f ? 1 : s_Degrees < 80.f ? 2 : s_Degrees < 100.f ? 3 : 4].fetch_add(1, std::memory_order_relaxed);
+    const uint32_t s_Hundredths = static_cast<uint32_t>(s_Angle * 5729.578f);
+    uint32_t s_Max = g_PinMaxAngle.load(std::memory_order_relaxed);
+
+    while (s_Hundredths > s_Max && !g_PinMaxAngle.compare_exchange_weak(s_Max, s_Hundredths, std::memory_order_relaxed)) {}
 }
 
 bool ReadablePose(const uint8_t* p_Out, PoseHook::Bone*& p_Bones, uint32_t& p_Count) {
@@ -88,7 +229,11 @@ void Update(void* p_This, void* p_In, uint8_t* p_Out, const void* p_World, uint6
         if (p_This == g_Watched[i].load(std::memory_order_relaxed))
             s_Watched = static_cast<int>(i);
 
-    if (s_Source < 0 && s_Extra < 0 && !s_IsTarget && s_Watched < 0)
+    PoseHook::Pin s_Pin;
+    const bool s_Pinned = !s_IsTarget && g_PinCount.load(std::memory_order_relaxed) && g_PinsOn.load(std::memory_order_relaxed) &&
+        FindPin(p_This, s_Pin);
+
+    if (s_Source < 0 && s_Extra < 0 && !s_IsTarget && s_Watched < 0 && !s_Pinned)
         return;
 
     PoseHook::Bone* s_Bones = nullptr;
@@ -96,6 +241,12 @@ void Update(void* p_This, void* p_In, uint8_t* p_Out, const void* p_World, uint6
 
     if (!ReadablePose(p_Out, s_Bones, s_Count))
         return;
+
+    // Pinned and nothing else: its own animation, stood where the pin says. No shared state.
+    if (s_Source < 0 && s_Extra < 0 && s_Watched < 0) {
+        ApplyPin(s_Bones[0], s_Pin, p_World);
+        return;
+    }
 
     std::lock_guard s_Lock(g_Mutex);
 
@@ -125,6 +276,10 @@ void Update(void* p_This, void* p_In, uint8_t* p_Out, const void* p_World, uint6
                 std::memcpy(s_Bones[i].pos, s_Pose[i].pos, sizeof(s_Bones[i].pos));
         }
     }
+
+    // After the partner's pose is in: the whole skeleton as it stands in the partner's game.
+    if (s_Pinned)
+        ApplyPin(s_Bones[0], s_Pin, p_World);
 
     if (s_IsTarget) {
         g_TargetCalls.fetch_add(1, std::memory_order_relaxed);
@@ -350,6 +505,35 @@ void PoseHook::SetTargetMask(const std::vector<uint8_t>& p_Mask) {
 void PoseHook::ClearTargetPose() {
     std::lock_guard s_Lock(g_Mutex);
     g_HasTargetPose = false;
+}
+
+void PoseHook::SetPins(std::vector<Pin>& p_Pins) {
+    std::sort(p_Pins.begin(), p_Pins.end(), [](const Pin& a, const Pin& b) { return a.animator < b.animator; });
+    std::unique_lock s_Lock(g_PinMutex);
+    g_Pins.swap(p_Pins);
+    g_PinCount.store(static_cast<uint32_t>(g_Pins.size()), std::memory_order_relaxed);
+}
+
+void PoseHook::SetPinsOn(bool p_On) {
+    g_PinsOn = p_On;
+}
+
+bool PoseHook::PinsOn() {
+    return g_PinsOn;
+}
+
+PoseHook::PinStats PoseHook::TakePinStats() {
+    PinStats s_Stats;
+    s_Stats.pinned = g_PinCount.load();
+    s_Stats.layout = g_PinLayout.load();
+    s_Stats.corrected = g_PinCorrected.exchange(0);
+    s_Stats.aligned = g_PinAligned.exchange(0);
+    s_Stats.unusable = g_PinUnusable.exchange(0);
+    s_Stats.maxAngle = static_cast<float>(g_PinMaxAngle.exchange(0)) / 100.f;
+
+    for (int i = 0; i < 5; ++i)
+        s_Stats.angles[i] = g_PinAngles[i].exchange(0);
+    return s_Stats;
 }
 
 uint32_t PoseHook::SourceBoneCount() {

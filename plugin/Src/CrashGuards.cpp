@@ -20,6 +20,7 @@ namespace {
         MuteSpeech, // in ZActor's ICharacterSpeakController::Speak: take its "no voice" path
         SkipUnit,   // at a function's entry (an actor's AI record in rcx): return at once
         NullGuard,  // a call whose result is read through: return instead when it is null
+        NullSlot,   // at a function's entry (the actor manager in rcx, a runtime id in edx): return when that slot has no actor
     };
 
     // Each place is found by its code pattern (IDA style, ?? any byte), wherever a game build has
@@ -56,6 +57,13 @@ namespace {
         // that (crash at +0x322f55, 3.280.0). cmp byte ptr [rcx+..],1; jne ret; lea rcx,[rax+..];
         // mov rax,[rcx]; call [rax+..]; xor edx,edx; mov rcx,[rax+..]; add rsp,28h; jmp .. (+0x322f3d)
         { "perceptibility guard", "80 79 ?? 01 75 ?? 48 8D 88 ?? ?? 00 00 48 8B 01 FF 90 ?? ?? 00 00 33 D2 48 8B 48 ?? 48 83 C4 28 E9", 37, Kind::NullGuard },
+        // The actor manager filling its per-actor tables for one runtime id (called as an actor
+        // comes back to life): mov [rsp+8],rbx; mov [rsp+10h],rsi; mov [rsp+18h],rdi; push rbp;
+        // push r12..r15; mov rbp,rsp; sub rsp,80h; movaps xmm0,[..]; lea rsi,[image]; movsxd
+        // r14,edx. It reads through the manager's actor for that id, which a restart has taken
+        // out already: a guest's game went down there when the host's mission ended and the
+        // guest's restarted for it (3.290.1, +0x16ab68 reading 0x28).
+        { "restart guard 4", "48 89 5C 24 08 48 89 74 24 10 48 89 7C 24 18 55 41 54 41 55 41 56 41 57 48 8B EC 48 81 EC 80 00 00 00 0F 28 05 ?? ?? ?? ?? 48 8D 35 ?? ?? ?? ?? 4C 63 F2 48 8D BE", 15, Kind::NullSlot },
     };
 
     // Where the reasoning's per-actor AI records are: the actor manager passes their table to the
@@ -102,6 +110,7 @@ namespace {
     // restart tears actors down meanwhile) without reading any actor again.
     std::unordered_map<void*, void*> g_PuppetActors;
     std::atomic<uint32_t> g_SkippedThinks = 0;
+    std::atomic<uint32_t> g_EmptySlots = 0;   // restart guard 4: calls for an id with no actor, skipped
     std::atomic<uint32_t> g_MutedLines = 0;   // counted by the stub
     std::atomic<uint32_t> g_AllLines = 0;     // every actor's, for comparison
     std::atomic<uint32_t> g_Calmed = 0;
@@ -420,6 +429,8 @@ int32_t CrashGuards::AlertFloor(const void* p_Knowledge) {
 
 uint32_t CrashGuards::SkippedThinks() { return g_SkippedThinks; }
 
+uint32_t CrashGuards::EmptySlots() { return g_EmptySlots; }
+
 bool CrashGuards::IsStandInKnowledge(const void* p_Knowledge) {
     return p_Knowledge && p_Knowledge == g_Knowledge.load(std::memory_order_relaxed);
 }
@@ -606,6 +617,19 @@ int CrashGuards::Install() {
             Emit64(s_Stub, reinterpret_cast<uint64_t>(&g_SkippedThinks));
             Emit(s_Stub, { 0xF0, 0xFF, 0x00 }); // lock inc dword ptr [rax]
             Emit(s_Stub, { 0xC3 });             // ret
+            // original:
+            s_Stub.insert(s_Stub.end(), s_Patch.original.begin(), s_Patch.original.end());
+            EmitJump(s_Stub, s_Resume);
+        }
+        else if (s_Patch.kind == Kind::NullSlot) {
+            Emit(s_Stub, { 0x48, 0x63, 0xC2 });                   // movsxd rax,edx
+            Emit(s_Stub, { 0x48, 0x01, 0xC0 });                   // add rax,rax
+            Emit(s_Stub, { 0x48, 0x83, 0x7C, 0xC1, 0x10, 0x00 }); // cmp qword ptr [rcx+rax*8+10h],0
+            Emit(s_Stub, { 0x75, 0x0E });                         // jne original (10 + 3 + 1 bytes on)
+            Emit(s_Stub, { 0x48, 0xB8 });                         // mov rax,&g_EmptySlots
+            Emit64(s_Stub, reinterpret_cast<uint64_t>(&g_EmptySlots));
+            Emit(s_Stub, { 0xF0, 0xFF, 0x00 });                   // lock inc dword ptr [rax]
+            Emit(s_Stub, { 0xC3 });                               // ret
             // original:
             s_Stub.insert(s_Stub.end(), s_Patch.original.begin(), s_Patch.original.end());
             EmitJump(s_Stub, s_Resume);

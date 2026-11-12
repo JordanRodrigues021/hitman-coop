@@ -12,6 +12,7 @@
 #include "Log.h"
 #include "PartnerPuppet.h"
 #include "PoseHook.h"
+#include "WorldScript.h"
 
 #include "Glacier/EntityFactory.h"
 #include "Glacier/Enums.h"
@@ -414,6 +415,36 @@ public:
     };
     StandInSlot m_HandSlot;
     StandInSlot m_BackSlot { .attach = 3 }; // eALBack
+    // Where each puppet was last put (see SetNpcTransform), for the pose hook's world pins.
+    struct NpcPin {
+        void* animator = nullptr;
+        coop::Transform xf;
+        double at = -100.0;
+        double lookedUpAt = -100.0;
+    };
+    std::unordered_map<uint64_t, NpcPin> m_NpcPins;
+    std::vector<PoseHook::Pin> m_PinScratch;
+    float m_PinTestYaw = 0.f; // test: puppets are put down turned by this many degrees
+    // The script sync (WorldScript.h): the level's interactions by their place in the scene.
+    std::unordered_map<uint64_t, ZEntityRef> m_ScriptRefs;
+    std::vector<WorldScript::Fired> m_ScriptFired;
+    struct PendingPin {
+        uint64_t key;
+        uint32_t pin;
+        double at;
+        int kind = 0;
+        uint32_t bits = 0;
+    };
+    std::vector<PendingPin> m_PendingPins;
+    void UpdateScriptSync();
+    void ApplyPeerScriptPin(const std::string& p_Text);
+    void RetryPeerScriptPins();
+    double m_NextNpcTable = 0.0;
+    void NoteNpcTable();
+    void FlushNpcPins();
+    bool m_StandInItemsOff = false; // the game faulted attaching one: none until the next mission
+    double m_StandInChangedAt = -100.0; // the stand-in last shown, hidden or given an item (see UpdateRestart)
+    int ForgetStandInItem(const ZEntityRef& p_Item);
     void UpdateStandInItem();
     void UpdateStandInSlot(StandInSlot& p_Slot, const char* p_Where);
     void DropStandInItem(StandInSlot& p_Slot);
@@ -431,6 +462,16 @@ public:
     // True for an event about an NPC we killed only to mirror the partner's game.
     // p_EvenTargets: also a target's (which still count here, but aren't sent back to the partner).
     bool IsPartnerKillEvent(const std::string& p_EventJson, bool p_EvenTargets = false) const;
+    // The NPCs, up and about, that one of the game's own events names (by repository id): our
+    // game's AI is doing something with them. At most p_Max.
+    std::vector<uint64_t> NpcsNamedIn(const std::string& p_EventJson, size_t p_Max = 6) const;
+    // Calm NPCs in earshot of something our 47 threw since the last call.
+    std::vector<uint64_t> TakeNoiseClaims();
+    // "3 of 35 NPCs ..." for the diagnostics.
+    std::string DescribeNpcIds() const;
+    std::string ScriptTest(const std::string& p_Arg);
+    std::string PinTest(const std::string& p_Arg);
+    std::string GotoTest(const std::string& p_Arg);
     // The Kill or Pacify event of the partner's victim came: its repository id (which later events
     // name it by) is kept, for an NPC with a name of its own. A crowd's "John Doe" is waited for
     // once only: kept by name, every later John Doe of ours was taken for the partner's.
@@ -551,7 +592,18 @@ private:
         bool ours = false;
         double followUntil = 0.0;
         coop::Transform sent;
+        coop::Vec3 from {};  // where our 47 let go of it
+        coop::Vec3 last {};  // where it was at the last look
+        bool landed = false; // thrown, and come down: its noise was told (see TakeNoiseClaims)
     };
+    // Where things our 47 threw are flying and landing: NPCs in earshot are ours to run.
+    std::vector<coop::Vec3> m_NoiseSpots;
+    // Each NPC's repository id (the game's own events name NPCs by it), and back.
+    mutable std::unordered_map<std::string, uint64_t> m_NpcByRepo;
+    mutable double m_NpcByRepoAt = -100.0;
+    mutable size_t m_NpcByRepoFor = 0;
+    mutable const char* m_RepoProperty = nullptr;
+    void RefreshNpcRepoIds() const;
     std::unordered_map<uint64_t, TrackedItem> m_Items;
     std::unordered_set<uint64_t> m_PeerHeldItems;
     double m_NextItemScan = 0.0;

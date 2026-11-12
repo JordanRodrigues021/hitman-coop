@@ -100,7 +100,7 @@ public:
 
 struct SessionConfig {
     std::string playerName = "Agent";
-    std::string modVersion = "0.13.95";
+    std::string modVersion = "0.14.0";
     std::string gameVersion = "unknown";
 
     double connectTimeout = 10.0;
@@ -114,6 +114,10 @@ struct SessionConfig {
     // between the players flip back and forth, sliding and walking through walls on resuming).
     float ownerHysteresis = 8.f;
     double ownerHoldTime = 5.0;
+    // An NPC at this alert level or above stays with the game that runs it (2: agitated, so
+    // anything but calm): its search or fight is in that game's AI only, and handed over
+    // mid-search it stood where it was with the other game's AI knowing nothing (was 4: alerted).
+    uint8_t ownerBusyTension = 2;
     // A puppet whose stream has stopped this long runs its own AI again (the partner's copy isn't
     // in their mission yet, or no longer: frozen here it stood or slid where nobody put it).
     double puppetDataTimeout = 5.0;
@@ -232,10 +236,12 @@ public:
     // Our player restarted p_Scene (not one restarted for the partner): theirs restarts too.
     void OnLocalRestart(const std::string& p_Scene);
 
-    // Our 47 hit an NPC (a shot, a thrown item, a blow): if the partner's game runs it (a puppet
-    // here, whose AI is off and ignores the hit), ours runs it from now on for a few seconds, and the
-    // host is told (a client's claim). Called again while the fight goes on, it keeps the claim.
-    void ClaimNpc(uint64_t p_Id, double p_Now);
+    // Our game has a reason to run an NPC itself: our 47 hit it (a shot, a thrown item, a blow),
+    // or it started looking into something only our game knows of (a coin our 47 threw). If the
+    // partner's game runs it (a puppet here, whose AI is off and ignores all that), ours runs it
+    // from now on for p_Seconds, and the host is told (a client's claim). One we run already stays
+    // ours that long too, however the players stand. Called again, it keeps the claim.
+    void ClaimNpc(uint64_t p_Id, double p_Now, double p_Seconds = 3.0, const char* p_Why = "hit by our 47");
 
     // Client only: the mission the host is in.
     bool GetHostScene(SceneDesc& p_Out) const;
@@ -534,6 +540,7 @@ private:
     double m_ContactUntil = -1.0;
     // NPCs our 47 hit (ClaimNpc), ours to run until then.
     std::unordered_map<uint64_t, double> m_ClaimedUntil;
+    std::unordered_map<uint64_t, double> m_ClaimToldUntil; // client: what the host was last told
     bool Claimed(uint64_t p_Id) const {
         const auto s_It = m_ClaimedUntil.find(p_Id);
         return s_It != m_ClaimedUntil.end() && m_LastTick < s_It->second;

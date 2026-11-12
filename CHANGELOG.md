@@ -3,6 +3,67 @@
 All notable changes to HITMAN Co-op, created by **Jordan Rodrigues**.
 Both players always need the same version.
 
+## 0.14.0 (2026-11-12): the milestone
+
+Both players need 0.14.0 (network protocol 18: it doesn't connect to 0.13.x). If you have 0.13.2 it
+updates itself the next time you start the game. Run the new setup instead if you want the game
+itself tuned for co-op (see below).
+
+0.14.0 has everything from the 0.13.90 to 0.13.95 betas. Its full list is in
+[installer/WHATSNEW.txt](installer/WHATSNEW.txt), and the short version is:
+
+- a new setup that does everything itself, sets up Tailscale, shows up in Settings > Apps, and no
+  longer trips antivirus;
+- bodies your partner drags follow them on your screen;
+- bodies and dropped items lie in the same place for both of you;
+- NPCs animated the same in both games;
+- a proper pause screen and signed updates;
+- the "signed in on another computer" causes checked and reported;
+- one download for game 3.290 and 3.280, and a Linux / Steam Deck installer.
+
+New in 0.14.0:
+
+**Logs: a new way of finding bugs**
+- **A flight recorder.** The mod keeps the last several thousand detailed events in memory at any log
+  level: NPC hand-overs and why, every game event, scripted mission steps, stand-in items, and the
+  NPCs around you every 20 s. It goes into every crash and every bug report as
+  `HitmanCoop-blackbox.txt`.
+- **Much more detailed crash reports:**
+  - the mod's functions by name (from `HitmanCoop.sym`, shipped beside the DLL);
+  - the registers and the bytes of the instruction that failed;
+  - what the mod was doing at that moment;
+  - the last 40 events;
+  - a crash dump kept on the player's PC.
+- **Caught faults on record:** faults the mod catches and survives go to `HitmanCoop-crash-caught.txt`.
+- **Bug reports** include the flight recorder and the mod loader's log.
+- **Developer tools** in `tools/`: `symbolize.py` (crash addresses to function names),
+  `gamedis.py` (the game's code around an address), `check-patterns.py` (every game patch against a
+  game build), `gamecfg.py` (the game's encrypted settings file).
+
+**Fixed**
+- **The partner's game crashed when you drew a rifle** or another two-handed weapon. The game kept
+  pointing at the item the mod had just taken from the stand-in. That's now cleared, and a fault
+  while the game attaches an item is caught.
+- **The partner's game crashed when you quit to the menu.** It was taken for a mission restart.
+  Leaving is no longer a restart, a restart waits for the stand-in to settle, and a new guard covers
+  the place in the game that went down.
+- **NPCs walking one way and facing another** on one player's screen. Every NPC the other game runs
+  is now pinned each frame to exactly how it stands there (the skeleton is corrected in the pose
+  update).
+- **Guards stuck with a "?"** after hearing something. NPCs near a thrown item, and NPCs your own game
+  starts something with (going to look, spotting you, getting sick), are run by your game until
+  they're done. Agitated, searching or alarmed NPCs no longer change hands.
+- **Missions getting stuck** (Hawke's Bay: the target ignoring 47 after the NDA). Scripted
+  interactions one player does now fire in the other game too. Doors, items, disguises and bodies
+  keep their own sync. `[sync] scripted_actions = false` turns this off.
+
+**The game itself**
+- **The setup tunes the game for co-op.** It edits one line of `Retail\thumbs.dat` (the game's
+  encrypted settings file), `OnlineDisableAutoReconnect=0`, so a dropped connection to IOI's servers
+  reconnects by itself instead of stopping the mission. The original file is kept beside it, there's
+  a tick box for it, uninstalling puts it back, and the mod makes the change again after a game
+  update.
+
 ## 0.13.2 (2026-10-31)
 
 If you have 0.13.0 or 0.13.1, it updates itself the next time you start the game. Plays with

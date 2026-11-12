@@ -269,10 +269,11 @@ bool MsgSceneInfo::Read(ByteReader& r) {
 void MsgNpcClaim::Write(ByteWriter& w) const {
     w.U32(epoch);
     w.U64(id);
+    w.U16(tenths);
 }
 
 bool MsgNpcClaim::Read(ByteReader& r) {
-    return r.U32(epoch) && r.U64(id) && id != 0;
+    return r.U32(epoch) && r.U64(id) && r.U16(tenths) && id != 0;
 }
 
 void MsgSceneReady::Write(ByteWriter& w) const {

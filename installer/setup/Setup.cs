@@ -3,7 +3,7 @@
 // One window, a few clear steps: install (one button), how to connect (join code or Tailscale, set
 // up here end to end), and done (launch the game). Everything happens in this program (see
 // Engine.cs); nothing runs hidden. Command line, for testing and the "Apps" uninstall:
-//   HitmanCoop-Setup.exe [--game <folder>] [--uninstall] [--silent [--log <file>] [--register]]
+//   HitmanCoop-Setup.exe [--game <folder>] [--uninstall] [--silent [--log <file>] [--register]] [--no-game-tweaks]
 //
 // Built by tools/package.ps1 with the C# compiler that ships with Windows (.NET Framework 4, C# 5).
 
@@ -27,15 +27,15 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("HITMAN Co-op")]
 [assembly: AssemblyCopyright("Copyright (C) 2026 Jordan Rodrigues. GPL-3.0-or-later.")]
 [assembly: AssemblyTrademark("HITMAN is a trademark of IO Interactive A/S. HITMAN Co-op is a fan project, not made or endorsed by IOI.")]
-[assembly: AssemblyVersion("0.13.95.0")]
-[assembly: AssemblyFileVersion("0.13.95.0")]
-[assembly: AssemblyInformationalVersion("0.13.95")]
+[assembly: AssemblyVersion("0.14.0.0")]
+[assembly: AssemblyFileVersion("0.14.0.0")]
+[assembly: AssemblyInformationalVersion("0.14.0")]
 
 namespace HitmanCoopSetup
 {
     static class Program
     {
-        public const string Version = "0.13.95";
+        public const string Version = "0.14.0";
         public const string Author = "Jordan Rodrigues";
         public const string Website = "https://github.com/JordanRodrigues021/hitman-coop";
         public const string Discord = "https://discord.gg/rQeHdpbKUp";
@@ -68,6 +68,7 @@ namespace HitmanCoopSetup
                 else if (a == "--register") o.Register = true;
                 else if (a == "--remove-settings") o.KeepSettings = false;
                 else if (a == "--auto") o.Auto = true;
+                else if (a == "--no-game-tweaks") Installer.TuneGame = false;
                 else if (a == "--render-pages" && next != null) { o.RenderTo = next; i++; }
             }
 
@@ -532,7 +533,7 @@ namespace HitmanCoopSetup
         readonly ToolTip m_Tip = new ToolTip();
         List<GameInstall> m_Found = new List<GameInstall>();
         GameInstall m_Game;
-        bool m_UseTailscale, m_Firewall;
+        bool m_UseTailscale, m_Firewall, m_TuneGame;
         volatile bool m_Closing;
         string m_AuthUrl;
         TailscaleStatus m_Ts;
@@ -1039,14 +1040,30 @@ namespace HitmanCoopSetup
             var fw = new CheckBox
             {
                 Text = "Let my partner connect straight to my PC when I host by IP or Tailscale (adds a Windows Firewall rule for HITMAN; Windows asks first)",
-                Checked = true, ForeColor = Theme.Dim, BackColor = Theme.Bg, Font = Theme.Ui(12.5f), Location = new Point(Theme.S(52), Theme.S(320)), Size = new Size(W - Theme.S(104), Theme.S(40)), FlatStyle = FlatStyle.Flat
+                Checked = true, ForeColor = Theme.Dim, BackColor = Theme.Bg, Font = Theme.Ui(12.5f), Location = new Point(Theme.S(52), Theme.S(312)), Size = new Size(W - Theme.S(104), Theme.S(40)), FlatStyle = FlatStyle.Flat
             };
             fw.CheckedChanged += delegate { m_Firewall = fw.Checked; };
             m_Page.Controls.Add(fw);
 
+            // The game's own settings file, tuned by the install (GameFiles.cs): the player's to undo.
+            m_TuneGame = Installer.TuneGame && GameFiles.Describe(m_Game.Retail) == "tuned";
+            var tune = new CheckBox
+            {
+                Text = "Tune the game for co-op: if the connection to IOI's servers drops, HITMAN reconnects by itself instead of stopping the mission (changes the game's thumbs.dat; uninstalling puts it back)",
+                Checked = m_TuneGame, ForeColor = Theme.Dim, BackColor = Theme.Bg, Font = Theme.Ui(12.5f), Location = new Point(Theme.S(52), Theme.S(354)), Size = new Size(W - Theme.S(104), Theme.S(44)), FlatStyle = FlatStyle.Flat
+            };
+            tune.FlatAppearance.BorderSize = 0;
+            bool tunedAtFirst = m_TuneGame;
+            tune.CheckedChanged += delegate { m_TuneGame = tune.Checked; };
+            m_Page.Controls.Add(tune);
+
             var go = Btn(m_Page, "Continue", Pill.Kind.Primary, W - Theme.S(50) - Theme.S(180), H - Theme.S(90), Theme.S(180), Theme.S(46), delegate
             {
                 Action next = delegate { if (m_UseTailscale) ShowTailscale(true); else ShowDone(); };
+                if (m_TuneGame != tunedAtFirst)
+                {
+                    try { Installer.SetGameTuning(m_Game, m_TuneGame, Say); WriteInstallLog(m_Game); } catch { }
+                }
                 if (m_Firewall) AddFirewallRule(next);
                 else next();
             });

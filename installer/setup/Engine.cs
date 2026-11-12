@@ -477,6 +477,9 @@ namespace HitmanCoopSetup
         // [sdk] lines this setup added to mods.ini (taken out again on uninstall); "[sdk]" itself if
         // the section was ours too.
         public List<string> SdkLines = new List<string>();
+        // Lines of the game's own settings file this setup changed (GameFiles.cs): "section/name"
+        // and the value the game had there ("" when it had no such line). Put back on uninstall.
+        public Dictionary<string, string> GameTweaks = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         public static InstallManifest Load(string retail)
         {
@@ -497,6 +500,10 @@ namespace HitmanCoopSetup
                 if (files != null)
                     foreach (var kv in files)
                         if (kv.Value is string) m.Files[kv.Key] = (string)kv.Value;
+                var tweaks = Util.Get(json, "gametweaks") as Dictionary<string, object>;
+                if (tweaks != null)
+                    foreach (var kv in tweaks)
+                        if (kv.Value is string) m.GameTweaks[kv.Key] = (string)kv.Value;
                 return m;
             }
             catch
@@ -515,6 +522,7 @@ namespace HitmanCoopSetup
             d["backups"] = Backups.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             d["files"] = Files;
             d["sdk"] = SdkLines.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            d["gametweaks"] = GameTweaks;
             File.WriteAllText(Path.Combine(retail, Games.ManifestName), Util.ToJson(d), new UTF8Encoding(false));
         }
 
@@ -533,6 +541,31 @@ namespace HitmanCoopSetup
     static class Installer
     {
         public delegate void Progress(int percent, string step);
+
+        // Set by --no-game-tweaks: the game's own settings file is left exactly as it is.
+        public static bool TuneGame = true;
+
+        // The game's own settings (GameFiles.cs), tuned for co-op or put back, after an install.
+        public static void SetGameTuning(GameInstall game, bool tuned, Action<string> log)
+        {
+            InstallManifest m = InstallManifest.Load(game.Retail);
+            if (m == null) return;
+
+            try
+            {
+                if (tuned) GameFiles.Apply(game.Retail, m.GameTweaks, log);
+                else
+                {
+                    GameFiles.Restore(game.Retail, m.GameTweaks, log);
+                    m.GameTweaks.Clear();
+                }
+                m.Save(game.Retail);
+            }
+            catch (Exception e)
+            {
+                log("Game settings (thumbs.dat) left as they are: " + e.Message);
+            }
+        }
 
         public static void Install(GameInstall game, Progress progress, Action<string> log)
         {
@@ -565,6 +598,7 @@ namespace HitmanCoopSetup
                 manifest.Added.AddRange(previous.Added);
                 manifest.Backups.AddRange(previous.Backups);
                 manifest.SdkLines.AddRange(previous.SdkLines);
+                foreach (var kv in previous.GameTweaks) manifest.GameTweaks[kv.Key] = kv.Value;
             }
 
             string[] files = Directory.GetFiles(payload, "*", SearchOption.AllDirectories);
@@ -608,6 +642,18 @@ namespace HitmanCoopSetup
             progress(85, "Turning the mod on");
             EnableInIni(Path.Combine(retail, "mods.ini"));
             SdkDefaults(Path.Combine(retail, "mods.ini"), manifest, log);
+
+            // The game's own settings, tuned for co-op (GameFiles.cs). Never a reason to fail the
+            // install: the mod works without, and says in its diagnostics how the file stands.
+            progress(88, "Tuning the game for co-op");
+            try
+            {
+                if (TuneGame) GameFiles.Apply(retail, manifest.GameTweaks, log);
+            }
+            catch (Exception e)
+            {
+                log("Game settings (thumbs.dat) left as they are: " + e.Message);
+            }
 
             progress(90, "Checking the files");
             // Everything really there: an antivirus can quietly take dinput8.dll (the mod loader).
@@ -653,6 +699,10 @@ namespace HitmanCoopSetup
             if (m != null)
                 RemoveSdkLines(ini, m.SdkLines);
 
+            // The game's own settings as they were.
+            if (m != null)
+                GameFiles.Restore(retail, m.GameTweaks, log);
+
             if (m != null)
             {
                 if (File.Exists(ini) && File.ReadAllText(ini).Trim().Length == 0) TryDelete(ini);
@@ -683,7 +733,8 @@ namespace HitmanCoopSetup
 
             // What the mod wrote while it ran: logs, crash notes, the updater's leftovers.
             string mods = Path.Combine(retail, "mods");
-            foreach (string name in new[] { "HitmanCoop.log", "HitmanCoop-previous.log", "HitmanCoop-crash.txt", "HitmanCoop-crash-previous.txt", "HitmanCoop-whatsnew.txt" })
+            foreach (string name in new[] { "HitmanCoop.log", "HitmanCoop-previous.log", "HitmanCoop-crash.txt", "HitmanCoop-crash-previous.txt", "HitmanCoop-whatsnew.txt",
+                         "HitmanCoop-blackbox-crash.txt", "HitmanCoop-blackbox-crash-previous.txt", "HitmanCoop-crash-caught.txt", "HitmanCoop-crash.dmp", "HitmanCoop-crash-previous.dmp" })
                 TryDelete(Path.Combine(mods, name));
             if (!keepSettings) TryDelete(Path.Combine(mods, "HitmanCoop.ini"));
             try

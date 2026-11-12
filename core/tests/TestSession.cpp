@@ -707,6 +707,72 @@ TEST(Session_NpcOurPlayerHitsIsOursToRun) {
     CHECK(!d.hostWorld.puppets.count(0x1005) && d.clientWorld.puppets.count(0x1005));
 }
 
+// A coin lands by an NPC in the client's game, which the host's game runs: the client's game runs
+// the whole investigation (players saw the guard stand there with a "?" for good).
+TEST(Session_NpcLookingIntoSomethingStaysWithItsGame) {
+    Duo d(47);
+    d.HostLoads(c_Miami, 10);
+    d.ClientLoads(c_Miami, 10, 0.f);
+    d.hostWorld.player.pos = FakeWorld::Center(0x1000);
+    d.clientWorld.player.pos = d.hostWorld.player.pos + Vec3 { 1.f, 0.f, 0.f };
+    d.Start();
+    REQUIRE(d.StepUntilSynced(2.0));
+    d.Step(3.0);
+    REQUIRE(d.clientWorld.puppets.count(0x1005));
+
+    d.client.ClaimNpc(0x1005, d.t, 40.0, "looking into something here");
+    CHECK_MSG(!d.clientWorld.puppets.count(0x1005), "still a puppet on the client right after its game claimed it");
+    d.Step(1.0);
+    CHECK(d.hostWorld.puppets.count(0x1005) && !d.clientWorld.puppets.count(0x1005));
+
+    // Still the client's 20 s on, the players standing together (a hit's 3 s claim is long over).
+    d.Step(20.0);
+    CHECK_MSG(d.hostWorld.puppets.count(0x1005) && !d.clientWorld.puppets.count(0x1005), "handed back in the middle of the investigation");
+
+    // Over: back to the host.
+    d.Step(35.0);
+    CHECK(!d.hostWorld.puppets.count(0x1005) && d.clientWorld.puppets.count(0x1005));
+
+    // One the client runs already, claimed: the host doesn't take it back while the claim lasts.
+    d.clientWorld.player.pos = FakeWorld::Center(0x1009);
+    d.Step(8.0);
+    REQUIRE(!d.clientWorld.puppets.count(0x1009) && d.hostWorld.puppets.count(0x1009));
+    d.client.ClaimNpc(0x1009, d.t, 30.0, "looking into something here");
+    d.clientWorld.player.pos = d.hostWorld.player.pos + Vec3 { 1.f, 0.f, 0.f };
+    d.hostWorld.player.pos = FakeWorld::Center(0x1009);
+    d.Step(15.0);
+    CHECK_MSG(!d.clientWorld.puppets.count(0x1009) && d.hostWorld.puppets.count(0x1009), "the host took back an NPC the client's game had claimed");
+    d.Step(30.0);
+    CHECK(d.clientWorld.puppets.count(0x1009) && !d.hostWorld.puppets.count(0x1009));
+}
+
+// An NPC that is anything but calm stays with the game it is searching in (the other game's AI
+// knows nothing of what it is looking for).
+TEST(Session_NpcThatIsNotCalmDoesNotChangeHands) {
+    Duo d(49);
+    d.HostLoads(c_Miami, 10);
+    d.ClientLoads(c_Miami, 10, 0.f);
+    d.hostWorld.player.pos = FakeWorld::Center(0x1000);
+    d.clientWorld.player.pos = FakeWorld::Center(0x1009);
+    d.Start();
+    REQUIRE(d.StepUntilSynced(2.0));
+    d.Step(3.0);
+    REQUIRE(!d.hostWorld.puppets.count(0x1000) && d.clientWorld.puppets.count(0x1000));
+
+    // NPC 0 gets agitated in the host's game (below "alerted"), and the players swap places.
+    d.hostWorld.npcs[0x1000].tension = 2;
+    d.clientWorld.player.pos = FakeWorld::Center(0x1000);
+    d.hostWorld.player.pos = FakeWorld::Center(0x1009);
+    d.Step(8.0);
+    CHECK_MSG(!d.hostWorld.puppets.count(0x1000) && d.clientWorld.puppets.count(0x1000), "an agitated NPC changed hands");
+    CHECK_MSG(!d.hostWorld.puppets.count(0x1009) && d.clientWorld.puppets.count(0x1009), "a calm NPC didn't follow the players");
+
+    // Calm again: it goes to the game that is nearer.
+    d.hostWorld.npcs[0x1000].tension = 1;
+    d.Step(8.0);
+    CHECK(d.hostWorld.puppets.count(0x1000) && !d.clientWorld.puppets.count(0x1000));
+}
+
 TEST(Session_PauseHoldsBothGames) {
     Duo d(35);
     d.HostLoads(c_Miami, 2);

@@ -1,6 +1,9 @@
 #include "SdkWorld.h"
 
 #include "CrashGuards.h"
+#include "BlackBox.h"
+#include "WorldScript.h"
+#include "Log.h"
 #include "GamePause.h"
 #include "RigScan.h"
 #include "Hooks.h"
@@ -145,6 +148,11 @@ void SdkWorld::OnSceneCleared() {
     m_BackItem.clear();
     m_BackItemSent.clear();
     m_BackItemSentAt = -100.0;
+    m_StandInItemsOff = false;
+    WorldScript::Clear();
+    m_ScriptRefs.clear();
+    m_NpcPins.clear();
+    m_NoiseSpots.clear();
 
     if (m_Trace)
         m_Trace("scene: cleared");
@@ -572,6 +580,7 @@ SdkWorld::Spawn SdkWorld::SpawnPartner(const coop::Transform& p_Xf) {
 
     if (m_Trace) {
         char s_Text[128];
+        m_StandInChangedAt = m_Now;
         std::snprintf(s_Text, sizeof(s_Text), "partner: spawned, actor %p entity %p", static_cast<void*>(s_Actor),
             static_cast<void*>(s_Entity.m_pObj));
         m_Trace(s_Text);
@@ -662,6 +671,10 @@ void SdkWorld::UpdatePoses() {
     void* s_Target = nullptr;
 
     UpdateStandInItem();
+    FlushNpcPins();
+    UpdateScriptSync();
+    RetryPeerScriptPins();
+    NoteNpcTable();
 
     // Once a second: the AI switched off for puppets still points at the right NPCs (see
     // CrashGuards::RefreshPuppetUnits), and puppets gone from the scene are let go.
@@ -1956,6 +1969,8 @@ void SdkWorld::ShowRemoteAvatar(const coop::Transform& p_Xf) {
         if (m_Trace)
             m_Trace("partner: showing again");
 
+        m_StandInChangedAt = m_Now;
+
         m_Partner.SetProperty("m_bVisible", true);
         m_PartnerHidden = false;
         m_RigHidden = false; // hidden again at once if its skeleton isn't matched yet
@@ -2045,6 +2060,7 @@ void SdkWorld::HideRemoteAvatar() {
     PoseHook::SetTarget(nullptr);
     PoseHook::ClearTargetPose();
     m_PartnerHidden = true;
+    m_StandInChangedAt = m_Now;
 
     if (!m_PartnerActor || !m_PartnerActor->m_pAnimatedActor) {
         if (m_Trace)
@@ -2466,8 +2482,61 @@ void SdkWorld::SetNpcTransform(uint64_t p_Id, const coop::Transform& p_Xf) {
     ZEntityRef s_Ref;
     s_Actor->GetID(s_Ref);
 
-    if (auto* s_Spatial = s_Ref.QueryInterface<ZSpatialEntity>())
+    // Pinned there too (PoseHook.h): the game's own movement code may turn or shift the body
+    // after this, on the NPC's last orders. Not a body: a ragdoll lies as the physics leaves it.
+    if (!s_Actor->IsDead() && !Pacified(s_Actor)) {
+        NpcPin& s_Pin = m_NpcPins[p_Id];
+
+        if (!s_Pin.animator || m_Now - s_Pin.lookedUpAt > 2.0) {
+            s_Pin.animator = AnimatorOf(s_Actor);
+            s_Pin.lookedUpAt = m_Now;
+        }
+
+        s_Pin.xf = p_Xf;
+        s_Pin.at = m_Now;
+    }
+    else {
+        m_NpcPins.erase(p_Id);
+    }
+
+    if (auto* s_Spatial = s_Ref.QueryInterface<ZSpatialEntity>()) {
+        // Test (pintest): the body is put down turned, the pin stays true. Drawn right all the same.
+        if (m_PinTestYaw != 0.f) {
+            coop::Transform s_Turned = p_Xf;
+            const float s_Half = m_PinTestYaw * 0.00872665f;
+            const coop::Quat s_Yaw { 0.f, 0.f, std::sin(s_Half), std::cos(s_Half) };
+            const coop::Quat q = p_Xf.rot;
+            s_Turned.rot = coop::Normalize({ s_Yaw.w * q.x + s_Yaw.x * q.w + s_Yaw.y * q.z - s_Yaw.z * q.y,
+                s_Yaw.w * q.y - s_Yaw.x * q.z + s_Yaw.y * q.w + s_Yaw.z * q.x,
+                s_Yaw.w * q.z + s_Yaw.x * q.y - s_Yaw.y * q.x + s_Yaw.z * q.w,
+                s_Yaw.w * q.w - s_Yaw.x * q.x - s_Yaw.y * q.y - s_Yaw.z * q.z });
+            s_Spatial->SetObjectToWorldMatrixFromEditor(ToMatrix(s_Turned));
+            return;
+        }
+
         s_Spatial->SetObjectToWorldMatrixFromEditor(ToMatrix(p_Xf));
+    }
+}
+
+void SdkWorld::FlushNpcPins() {
+    m_PinScratch.clear();
+
+    for (auto s_It = m_NpcPins.begin(); s_It != m_NpcPins.end();) {
+        // Not placed for half a second: released, dead, or run by its own AI again.
+        if (m_Now - s_It->second.at > 0.5 || !m_InScene) {
+            s_It = m_NpcPins.erase(s_It);
+            continue;
+        }
+
+        if (s_It->second.animator) {
+            const coop::Transform& s_Xf = s_It->second.xf;
+            m_PinScratch.push_back({ s_It->second.animator, { s_Xf.rot.x, s_Xf.rot.y, s_Xf.rot.z, s_Xf.rot.w }, { s_Xf.pos.x, s_Xf.pos.y, s_Xf.pos.z } });
+        }
+
+        ++s_It;
+    }
+
+    PoseHook::SetPins(m_PinScratch);
 }
 
 bool SdkWorld::IsLocallyPaused() const {
@@ -2517,6 +2586,12 @@ void SdkWorld::UpdateRestart(bool p_Playing) {
     }
 
     if (!p_Playing || m_Now - m_SceneReadyAt < 2.0)
+        return;
+
+    // Not right after the stand-in was hidden, shown or handed something: the game works such a
+    // change off over the next frames, and a restart in the middle of it read an actor the
+    // restart had already taken out (a guest's game went down 37 ms after the hide, 0.13.95).
+    if (m_Now - m_StandInChangedAt < 1.0)
         return;
 
     // Their pause menu, which they restarted from, held ours: let go first, restart a frame later.
@@ -2929,6 +3004,7 @@ void SdkWorld::CollectItemChanges(std::vector<coop::ItemChange>& p_Out) {
         // of it appears there.
         if (s_Tracked.ours) {
             s_Tracked = { false, m_Now + 4.0, s_Xf };
+            s_Tracked.from = s_Tracked.last = s_Xf.pos;
 
             if (!m_SceneItemKeys.contains(p_Id) && !m_CopyByItem.contains(p_Ref.m_pObj)) {
                 if (const std::string s_Repo = ItemRepository(p_Item); !s_Repo.empty()) {
@@ -2946,6 +3022,24 @@ void SdkWorld::CollectItemChanges(std::vector<coop::ItemChange>& p_Out) {
             p_Out.push_back({ p_Id, 0, s_Xf });
             return;
         }
+
+        // Thrown (some way from where our 47 let go of it): the NPCs it flies past and lands by
+        // hear it in our game only. They are ours to run before it lands, so the one who comes
+        // to look does so here (run by the partner's game, he stood there with a "?" for good).
+        if (!s_Tracked.landed && coop::Distance(s_Xf.pos, s_Tracked.from) > 2.5f) {
+            const bool s_Down = coop::Distance(s_Xf.pos, s_Tracked.last) < 0.15f;
+
+            if (m_NoiseSpots.size() < 64)
+                m_NoiseSpots.push_back(s_Xf.pos);
+
+            if (s_Down) {
+                s_Tracked.landed = true;
+                BlackBox::Note("noise", "thrown item %llu landed at %.1f %.1f %.1f, %.1f m from the throw", static_cast<unsigned long long>(p_Id),
+                    s_Xf.pos.x, s_Xf.pos.y, s_Xf.pos.z, coop::Distance(s_Xf.pos, s_Tracked.from));
+            }
+        }
+
+        s_Tracked.last = s_Xf.pos;
 
         // Still a while: where it came to rest, told as that, so the partner's copy is held there
         // against their own physics (it fell, rolled or slid its own way there).
@@ -4527,10 +4621,83 @@ void SdkWorld::SetPartnerHeldItem(const std::string& p_RepositoryId) {
     m_HandSlot.wanted = p_RepositoryId;
 }
 
+namespace {
+    // Raw memory only, under SEH (no objects, nothing that unwinds): what the game still holds of
+    // an item after ReleaseItem. Its attachment table keeps one slot per attach location, each a
+    // pointer to the reference of the item attached there, and the handler keeps its weapon and
+    // its carried item. Left pointing at an item we then destroy, the next item's attach reads
+    // through the freed one: a guest's game went down when the host drew a rifle (0.13.95,
+    // HITMAN3+0x174eb05 from ZActorInventoryHandler::FinalizePendingItems).
+    // Returns how many references were cleared, or -1 when the memory wasn't as expected.
+    int ForgetItemRaw(void* p_AttachmentHandler, void** p_Refs, int p_RefCount, void* p_Item) noexcept {
+        int s_Cleared = 0;
+
+        __try {
+            for (int i = 0; i < p_RefCount; ++i) {
+                if (p_Refs[i * 2] == p_Item) {
+                    p_Refs[i * 2] = nullptr;
+                    p_Refs[i * 2 + 1] = nullptr;
+                    ++s_Cleared;
+                }
+            }
+
+            if (p_AttachmentHandler) {
+                auto* s_Base = static_cast<uint8_t*>(p_AttachmentHandler);
+
+                for (int s_Offset = 0x20; s_Offset <= 0x40; s_Offset += 8) {
+                    void** s_Slot = *reinterpret_cast<void***>(s_Base + s_Offset);
+
+                    if (s_Slot && s_Slot[0] == p_Item) {
+                        s_Slot[0] = nullptr;
+                        s_Slot[1] = nullptr;
+                        ++s_Cleared;
+                    }
+                }
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            s_Cleared = -1;
+        }
+
+        return s_Cleared;
+    }
+
+    // The game's own attach of what is pending, under SEH: false when it faulted.
+    bool FinalizePendingRaw(ZActorInventoryHandler* p_Handler) noexcept {
+        __try {
+            Functions::ZActorInventoryHandler_FinalizePendingItems->Call(p_Handler);
+            return true;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+    }
+
+    void* RawEntity(const ZEntityRef& p_Ref) {
+        void* s_Raw = nullptr;
+        std::memcpy(&s_Raw, &p_Ref, sizeof(s_Raw));
+        return s_Raw;
+    }
+}
+
+int SdkWorld::ForgetStandInItem(const ZEntityRef& p_Item) {
+    if (!m_PartnerActor || !m_PartnerActor->m_pInventoryHandler || !p_Item)
+        return 0;
+
+    auto* s_Handler = m_PartnerActor->m_pInventoryHandler;
+    const BlackBox::Guarded s_Guard("clearing a taken item from the stand-in");
+    // m_rMainWeapon, m_rCarriedItem and the reference after them: three in a row.
+    return ForgetItemRaw(s_Handler->m_pAttachmentHandler, reinterpret_cast<void**>(&s_Handler->m_rMainWeapon), 3, RawEntity(p_Item));
+}
+
 void SdkWorld::DropStandInItem(StandInSlot& p_Slot) {
     if (p_Slot.item && m_PartnerActor) {
         m_PartnerActor->ReleaseItem(p_Slot.item, false);
+        const int s_Forgotten = ForgetStandInItem(p_Slot.item.m_entityRef);
         Functions::ZWorldInventory_DestroyItem->Call(Globals::WorldInventory, TEntityRef<IItemBase>(p_Slot.item.m_entityRef));
+        BlackBox::Note("standin", "item %s taken (%d stale refs cleared%s)", p_Slot.shown.c_str(), s_Forgotten,
+            s_Forgotten < 0 ? ": layout not as expected" : "");
+        m_StandInChangedAt = m_Now;
 
         if (m_Trace)
             m_Trace("held item: " + p_Slot.shown + " taken from the stand-in");
@@ -4569,7 +4736,8 @@ void SdkWorld::UpdateStandInSlot(StandInSlot& p_Slot, const char* p_Where) {
     DropStandInItem(p_Slot);
 
     // An item the game can't make here (not in this mission's resources) is tried again later.
-    if (s_Want.empty() || (s_Want == p_Slot.failedFor && m_Now - p_Slot.failedAt < 10.0))
+    // After a fault in the game's attach, this stand-in is given nothing more.
+    if (s_Want.empty() || m_StandInItemsOff || (s_Want == p_Slot.failedFor && m_Now - p_Slot.failedAt < 10.0))
         return;
 
     ZEntityRef s_ActorRef = m_PartnerActor->m_pInventoryHandler->m_rActor.m_entityRef;
@@ -4594,7 +4762,10 @@ void SdkWorld::UpdateStandInSlot(StandInSlot& p_Slot, const char* p_Where) {
         return;
     }
 
+    // Zeroed first: the game's struct has a flag more than the SDK's (what is carried, at +0x22),
+    // and stack garbage in it sent the item down another path every other time.
     ZActorInventoryHandler::SPendingItemInfo s_Pending;
+    std::memset(static_cast<void*>(&s_Pending), 0, sizeof(s_Pending));
     s_Pending.m_nTicket = s_Ticket;
     s_Pending.m_eAttachLocation = static_cast<EAttachLocation>(p_Slot.attach);
     s_Pending.m_eMaxTension = EGameTension::EGT_Undefined;
@@ -4629,7 +4800,32 @@ void SdkWorld::OnStandInItemCreated(uint32_t p_Ticket, TEntityRef<IItemBase> p_I
         }
     }
 
-    Functions::ZActorInventoryHandler_FinalizePendingItems->Call(m_PartnerActor->m_pInventoryHandler);
+    BlackBox::Note("standin", "attaching %s (%s, attach %d, weapon %d)", s_Slot->shown.c_str(),
+        s_Slot == &m_BackSlot ? "back" : "hand", s_Slot->attach, s_Slot->weapon ? 1 : 0);
+    m_StandInChangedAt = m_Now;
+
+    bool s_Attached = false;
+    {
+        const BlackBox::Guarded s_Guard("the game attaching an item to the stand-in");
+        s_Attached = FinalizePendingRaw(m_PartnerActor->m_pInventoryHandler);
+    }
+
+    if (!s_Attached) {
+        // The game faulted attaching it. What was pending is dropped (never looked at again) and
+        // the stand-in carries nothing for the rest of this mission: better than a crash.
+        auto& s_PendingItems = m_PartnerActor->m_pInventoryHandler->m_aPendingItems;
+        std::memset(static_cast<void*>(&s_PendingItems), 0, sizeof(s_PendingItems));
+        m_StandInItemsOff = true;
+        s_Slot->ticket = 0;
+        s_Slot->item = {};
+        s_Slot->failedAt = m_Now;
+        s_Slot->failedFor = s_Slot->shown;
+        s_Slot->shown.clear();
+        CoopLog::Fmt(coop::LogLevel::Warn, "standin", "the game faulted attaching %s to the stand-in: it carries nothing until the next mission",
+            s_Slot->failedFor.c_str());
+        return;
+    }
+
     s_Slot->ticket = 0;
 
     // Never picked up from it, by our 47 or anyone, and never taken for one of the level's items.
@@ -4786,12 +4982,84 @@ void SdkWorld::FindDoors() {
             s_BySpawner[s_Item->m_rSpawner.m_pObj].emplace_back(s_Entry->m_entityRef.m_pObj, s_Entry->m_entityRef->GetType()->m_nEntityID);
     }
 
+    // The level's interactions (and their steps), for the script sync (WorldScript.h): keyed by
+    // their place in the scene in the same walk. Kinds with a sync of their own aren't shared.
+    constexpr int32_t c_OwnSync = static_cast<int32_t>(EActionType::AT_OPENDOOR) | static_cast<int32_t>(EActionType::AT_CLOSEDOOR) |
+        static_cast<int32_t>(EActionType::AT_PICKUP) | static_cast<int32_t>(EActionType::AT_OUTFIT) |
+        static_cast<int32_t>(EActionType::AT_CLOTHBUNDLE) | static_cast<int32_t>(EActionType::AT_DRAGBODY) |
+        static_cast<int32_t>(EActionType::AT_RETRIEVE_ITEM_FROM_CONTAINER) | static_cast<int32_t>(EActionType::AT_HERO_MOVEMENT) |
+        static_cast<int32_t>(EActionType::AT_SWAPITEM) | static_cast<int32_t>(EActionType::AT_DUMPBODY) |
+        static_cast<int32_t>(EActionType::AT_COUP_DE_GRACE) | static_cast<int32_t>(EActionType::AT_STASHPOINT_PICKUP) |
+        static_cast<int32_t>(EActionType::AT_ENTERCLOSET) | static_cast<int32_t>(EActionType::AT_EXITCLOSET) |
+        static_cast<int32_t>(EActionType::AT_ENTERSAFEZONE) | static_cast<int32_t>(EActionType::AT_EXITSAFEZONE) |
+        static_cast<int32_t>(EActionType::AT_CANCEL) | static_cast<int32_t>(EActionType::AT_CONTAINERFLUSHBODY) |
+        static_cast<int32_t>(EActionType::AT_PLACE_ITEM_IN_CONTAINER) | static_cast<int32_t>(EActionType::AT_ITEMCONTAINER);
+    std::unordered_map<const void*, WorldScript::Watched> s_Actions;
+    m_ScriptRefs.clear();
+
+    if (Globals::HM5ActionManager) {
+        const auto s_Place = [](const ZEntityRef& p_Ref, WorldScript::Watched& p_Out) {
+            if (p_Out.hasPos || !p_Ref)
+                return;
+
+            if (const auto* s_Spatial = p_Ref.QueryInterface<ZSpatialEntity>()) {
+                const SMatrix s_World = s_Spatial->GetObjectToWorldMatrix();
+                p_Out.pos[0] = s_World.Trans.x;
+                p_Out.pos[1] = s_World.Trans.y;
+                p_Out.pos[2] = s_World.Trans.z;
+                // The world's origin is where things without a place of their own sit.
+                p_Out.hasPos = std::fabs(s_World.Trans.x) + std::fabs(s_World.Trans.y) + std::fabs(s_World.Trans.z) > 0.01f;
+            }
+        };
+
+        for (ZHM5Action* s_Action : Globals::HM5ActionManager->m_Actions) {
+            if (!s_Action || s_Actions.size() >= 8192)
+                continue;
+
+            ZEntityRef s_Ref;
+            s_Action->GetID(s_Ref);
+
+            if (!s_Ref || s_ItemObjects.contains(s_Ref.m_pObj))
+                continue;
+
+            WorldScript::Watched s_Watched;
+            s_Watched.object = s_Ref.m_pObj;
+            s_Watched.type = static_cast<int32_t>(s_Action->m_eActionType);
+            s_Watched.shared = (s_Watched.type & c_OwnSync) == 0;
+            strncpy_s(s_Watched.name, s_Action->m_sActionName.c_str() ? s_Action->m_sActionName.c_str() : "", _TRUNCATE);
+            s_Place(s_Action->m_3dPromptPosition.m_entityRef, s_Watched);
+            s_Place(s_Action->m_Object, s_Watched);
+            s_Place(s_Ref, s_Watched);
+            s_Actions.emplace(s_Ref.m_pObj, s_Watched);
+
+            // Its steps are entities of their own, with their own pins.
+            for (const auto& s_Sub : s_Action->m_aSubactions) {
+                if (!s_Sub.m_pInterfaceRef || !s_Sub.m_entityRef || s_Actions.contains(s_Sub.m_entityRef.m_pObj))
+                    continue;
+
+                WorldScript::Watched s_Step = s_Watched;
+                s_Step.object = s_Sub.m_entityRef.m_pObj;
+                s_Step.type = static_cast<int32_t>(s_Sub.m_pInterfaceRef->m_eActionType);
+                s_Step.shared = s_Watched.shared && (s_Step.type & c_OwnSync) == 0;
+                s_Actions.emplace(s_Step.object, s_Step);
+            }
+        }
+    }
+
+    std::vector<WorldScript::Watched> s_Watch;
+
     LARGE_INTEGER s_Start, s_End, s_Freq;
     QueryPerformanceCounter(&s_Start);
 
     ForEachSceneEntity([&](uint64_t p_Key, const ZEntityRef& p_Ref) {
         if ((s_Single && p_Ref.QueryInterface(s_Single)) || (s_Double && p_Ref.QueryInterface(s_Double)))
             m_Doors[p_Key] = { p_Ref, false, false };
+
+        if (const auto s_It = s_Actions.find(p_Ref.m_pObj); s_It != s_Actions.end() && s_It->second.key == 0) {
+            s_It->second.key = Mix(p_Key, 0xAC71) | 1;
+            s_Watch.push_back(s_It->second);
+            m_ScriptRefs[s_It->second.key] = p_Ref;
+        }
 
         if (const auto s_It = s_BySpawner.find(p_Ref.m_pObj); s_It != s_BySpawner.end()) {
             for (const auto& [s_Object, s_OwnId] : s_It->second) {
@@ -4811,6 +5079,25 @@ void SdkWorld::FindDoors() {
 
     for (auto& [s_Key, s_Door] : m_Doors)
         s_Door.known = ReadDoorOpen(s_Door.ref, s_Door.open);
+
+    // A door's own prompts are the door sync's.
+    for (auto& s_Watched : s_Watch)
+        for (const auto& [s_Key, s_Door] : m_Doors)
+            if (s_Door.ref.m_pObj == s_Watched.object)
+                s_Watched.shared = false;
+
+    {
+        size_t s_Shared = 0;
+
+        for (const auto& s_Watched : s_Watch)
+            s_Shared += s_Watched.shared ? 1 : 0;
+
+        if (m_Trace)
+            m_Trace("script: " + std::to_string(s_Watch.size()) + " of the level's " + std::to_string(s_Actions.size()) +
+                " interactions found in the scene, " + std::to_string(s_Shared) + " of a kind that is shared with the partner");
+    }
+
+    WorldScript::SetWatched(std::move(s_Watch));
 
     QueryPerformanceCounter(&s_End);
     QueryPerformanceFrequency(&s_Freq);
@@ -5169,6 +5456,8 @@ void SdkWorld::OnPeerMissionEvent(const std::string& p_Name, const std::string& 
         SetPartnerBackItem(p_Json == "-" ? std::string() : p_Json.substr(0, 64));
     else if (p_Name == "Coop_ItemSpawn")
         ApplyPeerItemSpawn(p_Json);
+    else if (p_Name == "Coop_Pin")
+        ApplyPeerScriptPin(p_Json);
     else if (p_Name == "Coop_Ping") {
         Pulse();
         NotifyAs(ToastKind::Partner, m_PartnerName + " is looking for you: follow the arrow.");
@@ -5650,4 +5939,425 @@ std::string SdkWorld::PartnerDisguise() const {
 
     const ZString& s_Name = s_Kit->m_pInterfaceRef->m_sCommonName;
     return coop::GameEvents::PlainText(std::string(s_Name.c_str(), s_Name.size()), 40);
+}
+
+namespace {
+// A 16 byte property (a ZGuid) straight from the entity, without the SDK's allocating getter.
+bool GuidProperty(const ZEntityRef& p_Ref, const char* p_Name, ZGuid& p_Out) {
+    const auto s_Entity = p_Ref.GetEntity();
+
+    if (!s_Entity)
+        return false;
+
+    const auto s_Type = s_Entity->GetType();
+
+    if (!s_Type || !s_Type->m_pPropertyData)
+        return false;
+
+    const uint32_t s_Id = Hash::Crc32(p_Name, std::strlen(p_Name));
+
+    for (uint32_t i = 0; i < s_Type->m_pPropertyData->size(); ++i) {
+        const SPropertyData* s_Property = &(*s_Type->m_pPropertyData)[i];
+
+        if (s_Property->m_nPropertyID != s_Id)
+            continue;
+
+        const auto* s_Info = s_Property->GetPropertyInfo();
+
+        if (!s_Info || !s_Info->m_propertyInfo.m_Type || !s_Info->m_propertyInfo.m_Type->GetTypeInfo() ||
+            s_Info->m_propertyInfo.m_Type->GetTypeInfo()->m_nTypeSize != sizeof(ZGuid))
+            return false;
+
+        const auto s_Address = reinterpret_cast<uintptr_t>(p_Ref.m_pObj) + s_Property->m_nPropertyOffset;
+
+        if (s_Info->m_propertyInfo.m_Flags & EPropertyInfoFlags::E_HAS_GETTER_SETTER)
+            s_Info->m_propertyInfo.m_PropertyGetter(reinterpret_cast<void*>(s_Address), &p_Out, s_Info->m_propertyInfo.m_nExtraData);
+        else
+            std::memcpy(static_cast<void*>(&p_Out), reinterpret_cast<const void*>(s_Address), sizeof(ZGuid));
+
+        return true;
+    }
+
+    return false;
+}
+
+std::string LowerGuid(const ZGuid& p_Guid) {
+    const ZString s_Str = p_Guid.ToString();
+    std::string s_Text(s_Str.c_str(), s_Str.size());
+
+    for (char& c : s_Text)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+    return s_Text == "00000000-0000-0000-0000-000000000000" ? std::string() : s_Text;
+}
+}
+
+void SdkWorld::RefreshNpcRepoIds() const {
+    // Now and then, and when NPCs came or went.
+    if (m_Now - m_NpcByRepoAt < 5.0 && m_NpcByRepoFor == m_NpcsById.size())
+        return;
+
+    m_NpcByRepoAt = m_Now;
+    m_NpcByRepoFor = m_NpcsById.size();
+    m_NpcByRepo.clear();
+    std::unordered_set<std::string> s_Shared;
+    // The property's name isn't in the SDK: the first of these that an actor has is it.
+    static constexpr const char* c_Names[] = { "RepositoryId", "m_RepositoryId", "m_sRepositoryId", "m_CharacterRepositoryId", "CharacterId" };
+
+    for (const auto& [s_Id, s_Actor] : m_NpcsById) {
+        if (!s_Actor)
+            continue;
+
+        ZEntityRef s_Ref;
+        s_Actor->GetID(s_Ref);
+        ZGuid s_Guid;
+        bool s_Have = false;
+
+        if (m_RepoProperty) {
+            s_Have = GuidProperty(s_Ref, m_RepoProperty, s_Guid);
+        }
+        else {
+            for (const char* s_Name : c_Names) {
+                if (GuidProperty(s_Ref, s_Name, s_Guid)) {
+                    m_RepoProperty = s_Name;
+                    s_Have = true;
+                    break;
+                }
+            }
+        }
+
+        const std::string s_Text = s_Have ? LowerGuid(s_Guid) : std::string();
+
+        if (s_Text.empty() || s_Shared.contains(s_Text))
+            continue;
+
+        // An id two NPCs share (the crowd's) names neither.
+        if (!m_NpcByRepo.emplace(s_Text, s_Id).second) {
+            m_NpcByRepo.erase(s_Text);
+            s_Shared.insert(s_Text);
+        }
+    }
+
+    BlackBox::Note("npcs", "%zu of %zu NPCs known by repository id (property %s)", m_NpcByRepo.size(), m_NpcsById.size(),
+        m_RepoProperty ? m_RepoProperty : "not found");
+}
+
+std::string SdkWorld::DescribeNpcIds() const {
+    RefreshNpcRepoIds();
+    return std::to_string(m_NpcByRepo.size()) + " of " + std::to_string(m_NpcsById.size()) + " NPCs known by repository id" +
+        (m_RepoProperty ? "" : " (property not found)");
+}
+
+std::vector<uint64_t> SdkWorld::NpcsNamedIn(const std::string& p_EventJson, size_t p_Max) const {
+    std::vector<uint64_t> s_Out;
+
+    if (!m_InScene || m_NpcsById.empty())
+        return s_Out;
+
+    RefreshNpcRepoIds();
+
+    if (m_NpcByRepo.empty())
+        return s_Out;
+
+    // Every "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" in the event.
+    const auto s_Hex = [](char c) { return std::isxdigit(static_cast<unsigned char>(c)) != 0; };
+
+    for (size_t i = 0; i + 36 <= p_EventJson.size() && s_Out.size() < p_Max; ++i) {
+        if (p_EventJson[i] != '"' || i + 37 >= p_EventJson.size() || p_EventJson[i + 37] != '"')
+            continue;
+
+        bool s_Guid = true;
+
+        for (size_t k = 0; k < 36 && s_Guid; ++k) {
+            const char c = p_EventJson[i + 1 + k];
+            s_Guid = (k == 8 || k == 13 || k == 18 || k == 23) ? c == '-' : s_Hex(c);
+        }
+
+        if (!s_Guid)
+            continue;
+
+        std::string s_Key = p_EventJson.substr(i + 1, 36);
+
+        for (char& c : s_Key)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+        i += 37;
+        const auto s_It = m_NpcByRepo.find(s_Key);
+
+        if (s_It == m_NpcByRepo.end())
+            continue;
+
+        ZActor* s_Actor = FindNpc(s_It->second);
+
+        if (s_Actor && s_Actor != m_PartnerActor && !ActorDown(s_Actor) && std::find(s_Out.begin(), s_Out.end(), s_It->second) == s_Out.end())
+            s_Out.push_back(s_It->second);
+    }
+
+    return s_Out;
+}
+
+std::vector<uint64_t> SdkWorld::TakeNoiseClaims() {
+    std::vector<uint64_t> s_Out;
+
+    if (m_NoiseSpots.empty())
+        return s_Out;
+
+    for (const auto& [s_Id, s_Actor] : m_NpcsById) {
+        coop::Transform s_Xf;
+
+        // Calm ones only: one searching or fighting stays with the game it does that in.
+        if (!s_Actor || s_Actor == m_PartnerActor || ActorDown(s_Actor) || !s_Actor->m_bEnabled ||
+            CrashGuards::TensionOf(s_Actor->m_pKnowledge) >= static_cast<int32_t>(EGameTension::EGT_Agitated) || !ActorTransform(s_Actor, s_Xf))
+            continue;
+
+        for (const coop::Vec3& s_Spot : m_NoiseSpots) {
+            if (coop::Distance(s_Xf.pos, s_Spot) < 9.f) {
+                s_Out.push_back(s_Id);
+                break;
+            }
+        }
+    }
+
+    m_NoiseSpots.clear();
+    return s_Out;
+}
+
+// What our 47 set off in the level's script since the last call, told to the partner; and where
+// our 47 stands, for telling its doing from the script's own.
+void SdkWorld::UpdateScriptSync() {
+    coop::Transform s_Local;
+    const bool s_Have = m_InScene && GetLocalAvatar(s_Local);
+    WorldScript::SetHero(s_Local.pos.x, s_Local.pos.y, s_Local.pos.z, s_Have);
+
+    m_ScriptFired.clear();
+
+    if (!WorldScript::Take(m_ScriptFired))
+        return;
+
+    for (const auto& s_Fired : m_ScriptFired) {
+        char s_Text[80];
+        std::snprintf(s_Text, sizeof(s_Text), "%llu %u %d %u", static_cast<unsigned long long>(s_Fired.key), s_Fired.pin, s_Fired.kind, s_Fired.bits);
+        Tell("Coop_Pin", s_Text);
+
+        if (m_Trace)
+            m_Trace("script: our 47 set off " + WorldScript::PinName(s_Fired.pin) + " of an interaction, told to the partner");
+    }
+}
+
+void SdkWorld::ApplyPeerScriptPin(const std::string& p_Text) {
+    unsigned long long s_Key = 0;
+    unsigned s_Pin = 0, s_Bits = 0;
+    int s_Kind = 0;
+
+    if (std::sscanf(p_Text.c_str(), "%llu %u %d %u", &s_Key, &s_Pin, &s_Kind, &s_Bits) < 2 || !m_InScene || !WorldScript::Shared())
+        return;
+
+    const auto s_Ref = m_ScriptRefs.find(s_Key);
+    std::string s_Name;
+
+    if (s_Ref == m_ScriptRefs.end() || !WorldScript::BeginReplay(s_Key, s_Pin, s_Name)) {
+        // Not in this game (the interactions weren't found yet, or the two games differ there).
+        m_PendingPins.push_back({ s_Key, s_Pin, m_Now, s_Kind, s_Bits });
+        BlackBox::Note("script", "the partner's %s of %016llx isn't in this game yet: kept for 10 s", WorldScript::PinName(s_Pin).c_str(), s_Key);
+        return;
+    }
+
+    {
+        const BlackBox::Scope s_Section("signalling an interaction the partner did");
+        float s_Float = 0.f;
+        std::memcpy(&s_Float, &s_Bits, sizeof(s_Float));
+
+        switch (s_Kind) {
+            case WorldScript::Value_Int32: s_Ref->second.SignalOutputPin(s_Pin, ZVariant<int32>(static_cast<int32>(s_Bits))); break;
+            case WorldScript::Value_Bool: s_Ref->second.SignalOutputPin(s_Pin, ZVariant<bool>(s_Bits != 0)); break;
+            case WorldScript::Value_Float: s_Ref->second.SignalOutputPin(s_Pin, ZVariant<float32>(s_Float)); break;
+            case WorldScript::Value_UInt32: s_Ref->second.SignalOutputPin(s_Pin, ZVariant<uint32>(s_Bits)); break;
+            default: s_Ref->second.SignalOutputPin(s_Pin); break;
+        }
+    }
+
+    WorldScript::EndReplay();
+
+    if (m_Trace)
+        m_Trace("script: the partner set off " + WorldScript::PinName(s_Pin) + " of '" + s_Name + "': done here too");
+}
+
+// The partner's interactions that came before ours were found (a few seconds into a mission).
+void SdkWorld::RetryPeerScriptPins() {
+    if (m_PendingPins.empty() || m_ScriptRefs.empty())
+        return;
+
+    auto s_Pending = std::move(m_PendingPins);
+    m_PendingPins.clear();
+
+    for (const auto& s_Pin : s_Pending) {
+        if (m_Now - s_Pin.at > 10.0)
+            continue;
+
+        if (m_ScriptRefs.contains(s_Pin.key)) {
+            char s_Text[80];
+            std::snprintf(s_Text, sizeof(s_Text), "%llu %u %d %u", static_cast<unsigned long long>(s_Pin.key), s_Pin.pin, s_Pin.kind, s_Pin.bits);
+            ApplyPeerScriptPin(s_Text);
+        }
+        else {
+            m_PendingPins.push_back(s_Pin);
+        }
+    }
+}
+
+// Test channel. script list [n] | goto <key> | fire <key> <pin> | stats | share 0/1
+std::string SdkWorld::ScriptTest(const std::string& p_Arg) {
+    std::istringstream s_Args(p_Arg);
+    std::string s_What;
+    s_Args >> s_What;
+
+    if (!m_DoorsFound && m_InScene)
+        FindDoors();
+
+    coop::Transform s_Local;
+    const bool s_Have = GetLocalAvatar(s_Local);
+
+    if (s_What == "list") {
+        size_t s_Max = 12;
+        s_Args >> s_Max;
+        auto s_List = WorldScript::List();
+        const auto s_Dist = [&](const WorldScript::Watched& w) {
+            return w.hasPos && s_Have ? coop::Distance({ w.pos[0], w.pos[1], w.pos[2] }, s_Local.pos) : 1e6f;
+        };
+        std::sort(s_List.begin(), s_List.end(), [&](const auto& a, const auto& b) { return s_Dist(a) < s_Dist(b); });
+        std::string s_Out = "script: " + WorldScript::Describe();
+
+        for (size_t i = 0; i < s_List.size() && i < s_Max; ++i) {
+            char s_Text[200];
+            std::snprintf(s_Text, sizeof(s_Text), "\nscript: #%zu key %llu type %x %s '%s' %.1f m", i, static_cast<unsigned long long>(s_List[i].key),
+                s_List[i].type, s_List[i].shared ? "shared" : "own-sync", s_List[i].name, s_Dist(s_List[i]));
+            s_Out += s_Text;
+        }
+
+        return s_Out;
+    }
+
+    if (s_What == "goto") {
+        unsigned long long s_Key = 0;
+        s_Args >> s_Key;
+        auto s_Player = SDK()->GetLocalPlayer();
+
+        for (const auto& s_Watched : WorldScript::List()) {
+            if (s_Watched.key != s_Key || !s_Watched.hasPos || !s_Player)
+                continue;
+
+            if (auto* s_Spatial = s_Player.m_entityRef.QueryInterface<ZSpatialEntity>()) {
+                SMatrix s_To = s_Spatial->GetObjectToWorldMatrix();
+                s_To.Trans.x = s_Watched.pos[0] + 0.8f;
+                s_To.Trans.y = s_Watched.pos[1];
+                s_To.Trans.z = s_Watched.pos[2];
+                s_Spatial->SetObjectToWorldMatrixFromEditor(s_To);
+                return "script: went to '" + std::string(s_Watched.name) + "'";
+            }
+        }
+
+        return "script: no such interaction with a place";
+    }
+
+    if (s_What == "fire") {
+        std::string s_Rest;
+        std::getline(s_Args, s_Rest);
+        const auto s_Before = WorldScript::Stats();
+        ApplyPeerScriptPin(s_Rest);
+        const auto s_After = WorldScript::Stats();
+        return std::string("script: fired as the partner's: ") + (s_After.applied > s_Before.applied ? "applied" : "not applied");
+    }
+
+    if (s_What == "share") {
+        int s_On = 1;
+        s_Args >> s_On;
+        WorldScript::SetShared(s_On != 0);
+    }
+
+    return "script: " + WorldScript::Describe();
+}
+
+// Test channel. pins yaw <degrees> | on | off | (nothing: where things stand)
+std::string SdkWorld::PinTest(const std::string& p_Arg) {
+    std::istringstream s_Args(p_Arg);
+    std::string s_What;
+    s_Args >> s_What;
+
+    if (s_What == "yaw")
+        s_Args >> m_PinTestYaw;
+    else if (s_What == "on" || s_What == "off")
+        PoseHook::SetPinsOn(s_What == "on");
+
+    char s_Text[200];
+    std::snprintf(s_Text, sizeof(s_Text), "pins: %s, %zu NPCs placed, bodies put down turned by %.0f deg; %s", PoseHook::PinsOn() ? "on" : "off",
+        m_NpcPins.size(), m_PinTestYaw, DescribeNpcIds().c_str());
+    return s_Text;
+}
+
+// Every 20 s, into the flight recorder: the NPCs nearest our 47, each with who runs it, how alert
+// it is and where it stands. With both players' recorders side by side, an NPC that stood wrong
+// or did nothing can be followed back to the moment it changed hands.
+void SdkWorld::NoteNpcTable() {
+    if (!m_InScene || m_Now < m_NextNpcTable)
+        return;
+
+    m_NextNpcTable = m_Now + 20.0;
+    coop::Transform s_Local;
+
+    if (!GetLocalAvatar(s_Local) || m_NpcsById.empty())
+        return;
+
+    struct Row {
+        float distance;
+        uint64_t id;
+        ZActor* actor;
+        coop::Transform xf;
+    };
+    std::vector<Row> s_Rows;
+
+    for (const auto& [s_Id, s_Actor] : m_NpcsById) {
+        coop::Transform s_Xf;
+
+        if (s_Actor && s_Actor != m_PartnerActor && ActorTransform(s_Actor, s_Xf))
+            s_Rows.push_back({ coop::Distance(s_Xf.pos, s_Local.pos), s_Id, s_Actor, s_Xf });
+    }
+
+    std::sort(s_Rows.begin(), s_Rows.end(), [](const Row& a, const Row& b) { return a.distance < b.distance; });
+    BlackBox::Note("npctable", "%zu NPCs, %zu puppets, %zu pinned; our 47 at %.1f %.1f %.1f; the nearest:", s_Rows.size(), CrashGuards::PuppetCount(),
+        m_NpcPins.size(), s_Local.pos.x, s_Local.pos.y, s_Local.pos.z);
+
+    for (size_t i = 0; i < s_Rows.size() && i < 24; ++i) {
+        const Row& r = s_Rows[i];
+        BlackBox::Note("npctable", "%016llx %-22.22s %s%s alert %d, %.1f m off at %.1f %.1f %.1f", static_cast<unsigned long long>(r.id),
+            r.actor->m_sActorName.c_str() ? r.actor->m_sActorName.c_str() : "", CrashGuards::IsPuppet(r.actor) ? "puppet" : "ours  ",
+            r.actor->IsDead() ? (Pacified(r.actor) ? " (out)" : " (dead)") : "", CrashGuards::TensionOf(r.actor->m_pKnowledge), r.distance, r.xf.pos.x,
+            r.xf.pos.y, r.xf.pos.z);
+    }
+}
+
+// Test channel. goto <x> <y> <z> [face x y]: our 47 there (facing that point).
+std::string SdkWorld::GotoTest(const std::string& p_Arg) {
+    float x = 0.f, y = 0.f, z = 0.f, fx = 0.f, fy = 0.f;
+    const int s_Read = std::sscanf(p_Arg.c_str(), "%f %f %f %f %f", &x, &y, &z, &fx, &fy);
+    auto s_Player = SDK()->GetLocalPlayer();
+
+    if (s_Read < 3 || !s_Player)
+        return "goto: give x y z";
+
+    auto* s_Spatial = s_Player.m_entityRef.QueryInterface<ZSpatialEntity>();
+
+    if (!s_Spatial)
+        return "goto: no 47";
+
+    coop::Transform s_Xf = ToTransform(s_Spatial->GetObjectToWorldMatrix());
+    s_Xf.pos = { x, y, z };
+
+    if (s_Read >= 5) {
+        // 47's forward is -Y in his own space (see the stand-in's facing).
+        const float s_Yaw = std::atan2(-(fx - x), fy - y) + 3.14159265f;
+        s_Xf.rot = { 0.f, 0.f, std::sin(s_Yaw * 0.5f), std::cos(s_Yaw * 0.5f) };
+    }
+
+    s_Spatial->SetObjectToWorldMatrixFromEditor(ToMatrix(s_Xf));
+    return "goto: at " + std::to_string(x) + " " + std::to_string(y) + " " + std::to_string(z);
 }

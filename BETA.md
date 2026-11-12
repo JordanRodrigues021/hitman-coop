@@ -1,7 +1,10 @@
 # HITMAN Co-op: the beta branch
 
-This branch has the code of the current **beta**. `main` has the last stable release (0.13.2).
-Betas go to the testers in the Discord's #beta-builds first, and come to `main` once they hold up.
+**0.14.0 is out as the stable release, so there's no beta right now.** Get it from the
+[latest release](https://github.com/JordanRodrigues021/hitman-coop/releases/latest). Its code is on `main`.
+
+This branch has the code of the current **beta** whenever there is one. Betas go to the testers in
+the Discord's #beta-builds first, and come to `main` once they hold up.
 
 ## The beta builds
 

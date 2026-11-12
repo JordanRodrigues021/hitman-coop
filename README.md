@@ -19,9 +19,63 @@ out a target at the same moment.
 
 It's free, it's open source, and I keep updating it.
 
-**Testers and developers:** the beta is on the [`beta` branch](https://github.com/JordanRodrigues021/hitman-coop/tree/beta)
-(code) and its builds are the [pre-releases](https://github.com/JordanRodrigues021/hitman-coop/releases).
-See [BETA.md](https://github.com/JordanRodrigues021/hitman-coop/blob/beta/BETA.md).
+## 0.14.0: the milestone
+
+**[Download 0.14.0](../../releases/latest)**. Both players need it (it doesn't connect to 0.13.x).
+If you have 0.13.2 it updates itself the next time you start the game.
+
+This is the biggest update so far. It has everything from the six 0.13.9x betas (a new setup that
+installs Tailscale for you, no more antivirus "trojan" alarms from the old installer, shared body
+drags, NPCs animated the same in both games, signed updates) and a new round of fixes from your bug
+reports. But the main change is in **how bugs get found and fixed from now on**.
+
+### A new way of logging
+
+Until now the log only kept what its level allowed. The moments right before a crash, or before an
+NPC got stuck, were usually missing. Then the only thing to do was turn on verbose logging and try
+to make the bug happen again.
+
+0.14.0 adds a **flight recorder**. The mod now keeps the last several thousand detailed events in
+memory all the time, at any log level:
+
+- every NPC that changed hands between the two games, and why
+- every event the game sends
+- every scripted step of the mission
+- every item given to your partner's copy
+- the NPCs around you, every 20 seconds
+
+All of it is written out with every crash, and into every bug report (`HitmanCoop-blackbox.txt`).
+**One bug report from each player is now enough to replay what both games did, side by side**,
+without asking anyone to reproduce anything.
+
+Crash reports changed too:
+
+- They name the mod's own functions.
+- They show the exact instruction that failed, and what the mod was doing at that moment.
+- They end with the last 40 events.
+
+Faults the mod catches and survives are written down too, so they get fixed even if nobody noticed.
+This is how the two crashes in 0.14.0 were found: from two players' crash files, traced to the exact
+line in minutes.
+
+### Also in 0.14.0
+
+- **Two crashes fixed:**
+  - the partner's game crashing when you drew a rifle;
+  - the partner's game crashing when you quit to the menu.
+- **NPCs facing the wrong way** (walking north while facing south) on one player's screen: every
+  shared NPC is now pinned every frame to exactly how it stands in the other game.
+- **Guards stuck with a "?"** after a noise: an NPC that hears something you throw, or that your game
+  starts something with, is now run by your game until it's done. NPCs that are searching or alarmed
+  no longer switch between the two games halfway through.
+- **Missions getting stuck** (the Hawke's Bay NDA): a scripted step one player does, like signing a
+  paper or sabotaging something, now happens in both games, so targets react for both of you.
+- **The setup now tunes the game itself for co-op.** HITMAN reconnects to IOI's servers on its own
+  instead of freezing the mission with a "connection lost" box. There's a tick box for it, and
+  uninstalling puts it back.
+
+All the changes are in the [changelog](CHANGELOG.md) and
+[installer/WHATSNEW.txt](installer/WHATSNEW.txt).
 
 ## Discord
 
@@ -121,9 +175,12 @@ Windows SmartScreen will probably say "Windows protected your PC" because the se
 a company. Click More info and then Run anyway. The SHA-256 of the setup is on the Releases page if
 you want to check it.
 
-If you'd rather use a zip, download `HitmanCoop-<version>.zip`, extract it and run Install.bat.
-Uninstall.bat takes it off again. To remove it with the setup, run it again and click UNINSTALL.
-Your saves aren't touched either way.
+If you'd rather use a zip, download `HitmanCoop-<version>.zip`, extract all of it and run
+`HitmanCoop-Setup.exe` from there. To remove the mod, go to Settings > Apps > HITMAN Co-op >
+Uninstall, or run the setup again and click UNINSTALL. Your saves aren't touched either way.
+
+On Linux or the Steam Deck, extract `HitmanCoop-<version>-linux.tar.gz` and run
+`bash installer.sh`.
 
 ## How to play together
 
@@ -219,9 +276,10 @@ Everything else is in the Settings tab and gets saved to `Retail\mods\HitmanCoop
 - "You are in a different mission" or "different difficulties": start the same mission on the same
   difficulty.
 
-To report a bug, open an [issue](../../issues). In the CO-OP window go to About and click Copy
-diagnostics (there are no IP addresses in it), and attach `Retail\mods\HitmanCoop.log` from both PCs.
-If the game crashed, add `Retail\mods\HitmanCoop-crash.txt` too.
+To report a bug, open an [issue](../../issues) or post in #bug-reports on the Discord. In the CO-OP
+window go to About and click **Save bug report** on **both** PCs. It makes one zip with the logs, the
+flight recorder, any crash report and the diagnostics (no IP addresses in any of it). Attach both
+zips. Please don't post `HitmanCoop-crash.dmp` unless you're asked: it holds the game's memory.
 
 Still stuck? Ask in #install-help on the [Discord](https://discord.gg/rQeHdpbKUp) or post it in
 #bug-reports. Someone there has probably run into it already.
@@ -229,8 +287,10 @@ Still stuck? Ask in #install-help on the [Discord](https://discord.gg/rQeHdpbKUp
 ## FAQ
 
 **Can I get banned?** HITMAN doesn't have an anti-cheat like EasyAntiCheat or BattlEye. This runs
-through ZHMModSDK, which is the normal HITMAN mod loader, and doesn't change any game files. It's
-still a mod though, so read the [disclaimer](DISCLAIMER.md).
+through ZHMModSDK, which is the normal HITMAN mod loader. It changes the game in memory while it
+runs, never the game's program on disk. The only game file the setup touches is one line of the
+settings file (`Retail\thumbs.dat`, so the game reconnects by itself). You can untick that, and it's
+put back when you uninstall. It's still a mod though, so read the [disclaimer](DISCLAIMER.md).
 
 **Does it mess with the online stuff?** No. It never talks to IO Interactive's servers, co-op goes
 over its own connection, and your game logs in like normal. When the game starts it checks this
@@ -242,8 +302,8 @@ let me know how it goes.
 
 ## What's new
 
-0.13.2 fixed bodies going invisible by themselves and made updates download on more internet
-connections. Everything older is in the [changelog](CHANGELOG.md).
+0.14.0 is the milestone release (see [the top of this page](#0140-the-milestone)). Every version is
+in the [changelog](CHANGELOG.md).
 
 ## Building it yourself
 
