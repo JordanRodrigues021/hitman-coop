@@ -5,6 +5,7 @@
 #include "CoopText.h"
 #include "CrashGuards.h"
 #include "GamePause.h"
+#include "Log.h"
 
 #include <Windows.h>
 
@@ -15,6 +16,7 @@
 #include <sstream>
 
 #include "IconsMaterialDesign.h"
+#include "OnlineWatch.h"
 
 namespace {
     const ImVec4 c_Red(0.86f, 0.08f, 0.14f, 1.f);
@@ -399,6 +401,228 @@ void HitmanCoop::DrawCountdown() {
         s_Go ? IM_COL32(120, 255, 140, s_Alpha) : IM_COL32(255, 210, 80, s_Alpha), s_Text, 5.f - 1.5f * s_Phase);
 }
 
+// ---- The pause screen ---------------------------------------------------------------------------
+// While the partner's menu holds our game (or the mission waits for them to load in): the screen
+// dimmed inside a red border, and a title card the way HITMAN titles its own screens (heavy
+// capitals spaced out, a red rule, a quieter line under it). It fades in and out, so the stop
+// isn't a bare freeze.
+namespace {
+    // One UTF-8 character from p_At: its end.
+    size_t NextChar(const std::string& p_Text, size_t p_At) {
+        size_t s_End = p_At + 1;
+
+        while (s_End < p_Text.size() && (static_cast<unsigned char>(p_Text[s_End]) & 0xC0) == 0x80)
+            ++s_End;
+
+        return s_End;
+    }
+
+    float SpacedWidth(ImFont* p_Font, float p_Size, const std::string& p_Text, float p_Spacing) {
+        float s_Width = 0.f;
+        int s_Chars = 0;
+
+        for (size_t i = 0; i < p_Text.size();) {
+            const size_t j = NextChar(p_Text, i);
+            s_Width += p_Font->CalcTextSizeA(p_Size, FLT_MAX, 0.f, p_Text.data() + i, p_Text.data() + j).x;
+            ++s_Chars;
+            i = j;
+        }
+
+        return s_Chars > 1 ? s_Width + p_Spacing * static_cast<float>(s_Chars - 1) : s_Width;
+    }
+
+    // Letters p_Spacing apart, centred on p_CentreX, a soft shadow under them.
+    void SpacedText(ImDrawList* p_List, ImFont* p_Font, float p_Size, float p_CentreX, float p_Y, ImU32 p_Colour, const std::string& p_Text,
+        float p_Spacing, int p_ShadowAlpha) {
+        float s_X = p_CentreX - SpacedWidth(p_Font, p_Size, p_Text, p_Spacing) * 0.5f;
+        const float s_Drop = std::max(1.f, p_Size * 0.04f);
+
+        for (size_t i = 0; i < p_Text.size();) {
+            const size_t j = NextChar(p_Text, i);
+            const char* s_A = p_Text.data() + i;
+            const char* s_B = p_Text.data() + j;
+
+            if (p_ShadowAlpha > 0)
+                p_List->AddText(p_Font, p_Size, ImVec2(s_X + s_Drop, p_Y + s_Drop), IM_COL32(0, 0, 0, p_ShadowAlpha), s_A, s_B);
+
+            p_List->AddText(p_Font, p_Size, ImVec2(s_X, p_Y), p_Colour, s_A, s_B);
+            s_X += p_Font->CalcTextSizeA(p_Size, FLT_MAX, 0.f, s_A, s_B).x + p_Spacing;
+            i = j;
+        }
+    }
+
+    std::string Upper(std::string p_Text) {
+        for (char& c : p_Text)
+            if (c >= 'a' && c <= 'z')
+                c = static_cast<char>(c - 'a' + 'A');
+
+        return p_Text;
+    }
+
+    float EaseOut(float t) {
+        t = std::clamp(t, 0.f, 1.f);
+        return 1.f - (1.f - t) * (1.f - t) * (1.f - t);
+    }
+
+    // HITMAN's red.
+    constexpr int c_PauseR = 210, c_PauseG = 8, c_PauseB = 28;
+    ImU32 PauseRed(float p_Alpha) { return IM_COL32(c_PauseR, c_PauseG, c_PauseB, static_cast<int>(std::clamp(p_Alpha, 0.f, 1.f) * 255.f)); }
+}
+
+void HitmanCoop::DrawPauseScreen(const coop::SessionStatus& p_Status) {
+    bool s_Held, s_Waiting, s_OwnMenu;
+    double s_For, s_Left, s_WaitLeft;
+
+    {
+        std::lock_guard s_Lock(m_StatusMutex);
+        s_Held = m_OverlayPartnerHold;
+        s_Waiting = m_OverlayWaiting;
+        s_OwnMenu = m_OverlayOwnMenu;
+        s_For = m_OverlayPauseFor;
+        s_Left = m_OverlayPauseLeft;
+        s_WaitLeft = m_OverlayWaitLeft;
+    }
+
+    const double s_Now = Now();
+    const bool s_Preview = s_Now < m_PausePreviewUntil;
+
+    if (s_Preview) {
+        s_Held = true;
+        s_Waiting = false;
+        s_OwnMenu = false;
+        s_For = s_Now - (m_PausePreviewUntil - 6.0);
+        s_Left = 120.0 - s_For;
+    }
+
+    // Our own pause menu is on screen over it: the game's own then.
+    const bool s_Want = (s_Held || s_Waiting) && !s_OwnMenu && (s_Preview || p_Status.state == coop::SessionState::Connected);
+    const float s_Dt = std::clamp(ImGui::GetIO().DeltaTime, 0.f, 0.1f);
+
+    // What it says, kept while it fades out.
+    if (s_Want) {
+        const int s_Menu = p_Status.peerStateKnown ? p_Status.peerState.menu : 0;
+        const std::string s_Name = Upper(s_Preview || p_Status.peerName.empty() ? std::string("your partner") : p_Status.peerName);
+        m_PauseWaiting = !s_Held && s_Waiting;
+
+        if (m_PauseWaiting) {
+            m_PauseTitle = "MISSION ON HOLD";
+            m_PauseLine = "WAITING FOR " + s_Name + " TO LOAD IN";
+            m_PauseFoot = "Starting without them in " + Clock(std::max(0.0, s_WaitLeft));
+        }
+        else {
+            m_PauseTitle = "GAME PAUSED";
+            m_PauseLine = s_Name + " IS IN " + Upper(s_Menu > 0 ? MenuName(s_Menu) : "the pause menu");
+            m_PauseFoot = "Paused " + Clock(std::max(0.0, s_For)) + "   |   Your game resumes when they close it" +
+                (s_Left < 60.0 ? ", or in " + Clock(std::max(0.0, s_Left)) : std::string());
+        }
+    }
+
+    // In over a third of a second, out over a quarter.
+    m_PauseFx = std::clamp(m_PauseFx + (s_Want ? s_Dt / 0.35f : -s_Dt / 0.25f), 0.f, 1.f);
+
+    if (m_PauseFx <= 0.f)
+        return;
+
+    const float s_Fx = EaseOut(m_PauseFx);
+    const ImGuiViewport* s_View = ImGui::GetMainViewport();
+    const ImVec2 s_Min = s_View->Pos;
+    const ImVec2 s_Max(s_View->Pos.x + s_View->Size.x, s_View->Pos.y + s_View->Size.y);
+    const float s_W = s_View->Size.x, s_H = s_View->Size.y;
+    const float s_Scale = std::max(0.5f, s_H / 1080.f);
+    ImDrawList* s_List = ImGui::GetBackgroundDrawList();
+
+    // The game dimmed, a little more towards the middle band where the card sits.
+    s_List->AddRectFilled(s_Min, s_Max, IM_COL32(0, 0, 0, static_cast<int>(95.f * s_Fx)));
+    const float s_BandTop = s_Min.y + s_H * 0.30f, s_BandBottom = s_Min.y + s_H * 0.64f, s_BandMid = (s_BandTop + s_BandBottom) * 0.5f;
+    const ImU32 s_Clear = IM_COL32(0, 0, 0, 0), s_Band = IM_COL32(0, 0, 0, static_cast<int>(120.f * s_Fx));
+    s_List->AddRectFilledMultiColor(ImVec2(s_Min.x, s_BandTop), ImVec2(s_Max.x, s_BandMid), s_Clear, s_Clear, s_Band, s_Band);
+    s_List->AddRectFilledMultiColor(ImVec2(s_Min.x, s_BandMid), ImVec2(s_Max.x, s_BandBottom), s_Band, s_Band, s_Clear, s_Clear);
+
+    // The red border: a glow from each edge inwards, breathing slowly, and a hairline on the edge.
+    const float s_Breath = 0.88f + 0.12f * std::sin(static_cast<float>(s_Now) * 2.2f);
+    const float s_Edge = 0.55f * s_Fx * s_Breath;
+    const float s_Depth = std::min(s_W, s_H) * 0.14f;
+    const ImU32 s_Red = PauseRed(s_Edge), s_Fade = PauseRed(0.f);
+    s_List->AddRectFilledMultiColor(s_Min, ImVec2(s_Max.x, s_Min.y + s_Depth), s_Red, s_Red, s_Fade, s_Fade);
+    s_List->AddRectFilledMultiColor(ImVec2(s_Min.x, s_Max.y - s_Depth), s_Max, s_Fade, s_Fade, s_Red, s_Red);
+    s_List->AddRectFilledMultiColor(s_Min, ImVec2(s_Min.x + s_Depth, s_Max.y), s_Red, s_Fade, s_Fade, s_Red);
+    s_List->AddRectFilledMultiColor(ImVec2(s_Max.x - s_Depth, s_Min.y), s_Max, s_Fade, s_Red, s_Red, s_Fade);
+    // (a tighter, stronger glow right at the edge)
+    const float s_Tight = s_Depth * 0.18f;
+    const ImU32 s_Hot = PauseRed(0.55f * s_Fx);
+    s_List->AddRectFilledMultiColor(s_Min, ImVec2(s_Max.x, s_Min.y + s_Tight), s_Hot, s_Hot, s_Fade, s_Fade);
+    s_List->AddRectFilledMultiColor(ImVec2(s_Min.x, s_Max.y - s_Tight), s_Max, s_Fade, s_Fade, s_Hot, s_Hot);
+    s_List->AddRectFilledMultiColor(s_Min, ImVec2(s_Min.x + s_Tight, s_Max.y), s_Hot, s_Fade, s_Fade, s_Hot);
+    s_List->AddRectFilledMultiColor(ImVec2(s_Max.x - s_Tight, s_Min.y), s_Max, s_Fade, s_Hot, s_Hot, s_Fade);
+    s_List->AddRect(ImVec2(s_Min.x + 1.f, s_Min.y + 1.f), ImVec2(s_Max.x - 1.f, s_Max.y - 1.f), PauseRed(0.9f * s_Fx), 0.f, 0, 3.f * s_Scale);
+
+    // The card, rising a little into place as it appears.
+    ImFont* s_Black = SDK()->GetImGuiBlackFont();
+    ImFont* s_Bold = SDK()->GetImGuiBoldFont();
+    ImFont* s_Regular = SDK()->GetImGuiRegularFont();
+
+    if (!s_Black || !s_Bold || !s_Regular)
+        s_Black = s_Bold = s_Regular = ImGui::GetFont();
+
+    const float s_Cx = s_Min.x + s_W * 0.5f;
+    float s_Y = s_Min.y + s_H * 0.36f + (1.f - s_Fx) * 18.f * s_Scale;
+    const int s_TextAlpha = static_cast<int>(255.f * s_Fx);
+    const int s_Shadow = static_cast<int>(150.f * s_Fx);
+
+    // "CO-OP" over it, small and red, with the pause mark (or the hourglass's sand) beside it.
+    const float s_TagSize = 19.f * s_Scale;
+    const std::string s_Tag = "HITMAN  CO-OP";
+    const float s_TagSpacing = s_TagSize * 0.32f;
+    const float s_TagWidth = SpacedWidth(s_Bold, s_TagSize, s_Tag, s_TagSpacing);
+    SpacedText(s_List, s_Bold, s_TagSize, s_Cx, s_Y, PauseRed(s_Fx), s_Tag, s_TagSpacing, s_Shadow);
+    {
+        const float s_BarH = s_TagSize * 0.9f, s_BarW = s_TagSize * 0.22f;
+        const float s_X = s_Cx - s_TagWidth * 0.5f - s_TagSize * 1.1f;
+
+        if (m_PauseWaiting) {
+            const float s_Spin = static_cast<float>(std::fmod(s_Now, 1.2) / 1.2);
+            s_List->AddCircle(ImVec2(s_X + s_BarW, s_Y + s_TagSize * 0.52f), s_BarH * 0.45f, PauseRed(0.35f * s_Fx), 24, 2.f * s_Scale);
+            s_List->PathArcTo(ImVec2(s_X + s_BarW, s_Y + s_TagSize * 0.52f), s_BarH * 0.45f, s_Spin * 6.2832f, s_Spin * 6.2832f + 1.6f, 12);
+            s_List->PathStroke(PauseRed(s_Fx), 0, 2.f * s_Scale);
+        }
+        else {
+            s_List->AddRectFilled(ImVec2(s_X, s_Y + s_TagSize * 0.08f), ImVec2(s_X + s_BarW, s_Y + s_TagSize * 0.08f + s_BarH), PauseRed(s_Fx));
+            s_List->AddRectFilled(ImVec2(s_X + s_BarW * 1.9f, s_Y + s_TagSize * 0.08f), ImVec2(s_X + s_BarW * 2.9f, s_Y + s_TagSize * 0.08f + s_BarH),
+                PauseRed(s_Fx));
+        }
+    }
+
+    s_Y += s_TagSize * 1.7f;
+
+    // The title: heavy capitals, their spacing closing in as it appears.
+    const float s_TitleSize = 78.f * s_Scale;
+    const float s_TitleSpacing = s_TitleSize * (0.06f + 0.10f * (1.f - s_Fx));
+    const float s_TitleWidth = SpacedWidth(s_Black, s_TitleSize, m_PauseTitle, s_TitleSpacing);
+    SpacedText(s_List, s_Black, s_TitleSize, s_Cx, s_Y, IM_COL32(255, 255, 255, s_TextAlpha), m_PauseTitle, s_TitleSpacing, s_Shadow);
+    s_Y += s_TitleSize * 1.12f;
+
+    // The red rule under it, drawn out from the middle, fading at its ends.
+    {
+        const float s_Half = std::max(s_TitleWidth * 0.5f, 220.f * s_Scale) * s_Fx;
+        const float s_Th = 3.f * s_Scale;
+        const ImU32 s_Solid = PauseRed(s_Fx);
+        s_List->AddRectFilledMultiColor(ImVec2(s_Cx - s_Half, s_Y), ImVec2(s_Cx, s_Y + s_Th), s_Fade, s_Solid, s_Solid, s_Fade);
+        s_List->AddRectFilledMultiColor(ImVec2(s_Cx, s_Y), ImVec2(s_Cx + s_Half, s_Y + s_Th), s_Solid, s_Fade, s_Fade, s_Solid);
+    }
+
+    s_Y += 22.f * s_Scale;
+
+    // Who, and where they are.
+    const float s_LineSize = 25.f * s_Scale;
+    SpacedText(s_List, s_Bold, s_LineSize, s_Cx, s_Y, IM_COL32(235, 235, 235, s_TextAlpha), m_PauseLine, s_LineSize * 0.16f, s_Shadow);
+    s_Y += s_LineSize * 1.9f;
+
+    // The time, quietly.
+    const float s_FootSize = 17.f * s_Scale;
+    SpacedText(s_List, s_Regular, s_FootSize, s_Cx, s_Y, IM_COL32(200, 200, 200, static_cast<int>(200.f * s_Fx)), m_PauseFoot, s_FootSize * 0.04f,
+        s_Shadow);
+}
+
 // The mission's end: both players side by side, for half a minute.
 // What's new in the version the mod just updated itself to: for a while on its first start.
 void HitmanCoop::DrawWhatsNew() {
@@ -750,6 +974,18 @@ void HitmanCoop::DrawHeader(const coop::SessionStatus& p_Status, bool p_InMissio
     ImGui::SameLine();
     ImGui::TextWrapped("%s", s_Line.c_str());
 
+    // How in sync the two games are, from the last check (every 10 s, see Session::FinishNpcCheck).
+    if (p_Status.synced && p_Status.npcCheck.at > 0.0 && p_Status.npcCheck.compared > 0) {
+        const auto& c = p_Status.npcCheck;
+        const float s_Share = static_cast<float>(c.same + c.fewMetres) / static_cast<float>(c.compared);
+        const ImVec4 s_Colour = c.outOfPlace == 0 ? s_Palette.good : s_Share > 0.9f ? c_Gold : s_Palette.bad;
+        ImGui::TextColored(s_Colour, ICON_MD_SYNC " NPCs in sync: %.0f%% (%zu of %zu within 5 m%s)", s_Share * 100.f, c.same + c.fewMetres, c.compared,
+            c.outOfPlace ? (", " + std::to_string(c.outOfPlace) + " out of place").c_str() : "");
+
+        if (ImGui::IsItemHovered() && !c.worst.empty())
+            ImGui::SetTooltip("Worst: %s", c.worst.c_str());
+    }
+
     if (p_Status.state == coop::SessionState::Connected && !p_Status.peerModVersion.empty() && p_Status.peerModVersion != c_ModVersion)
         ImGui::TextColored(c_Gold, ICON_MD_INFO " %s has HITMAN Co-op %s, you have %s.", p_Status.peerName.c_str(), p_Status.peerModVersion.c_str(), c_ModVersion);
 
@@ -759,10 +995,13 @@ void HitmanCoop::DrawHeader(const coop::SessionStatus& p_Status, bool p_InMissio
 
     if (!m_Unsupported.empty()) {
         ImGui::PushStyleColor(ImGuiCol_Text, c_Red);
-        ImGui::TextWrapped(
-            "This game version (%s) isn't compatible with HITMAN Co-op %s: the mod loader couldn't find %s in it. "
-            "Co-op stays off so nothing can break. Update the game, then get the HITMAN Co-op build made for it.",
-            m_GameVersion.c_str(), c_ModVersion, m_Unsupported.c_str());
+        if (!m_WrongGame.empty())
+            ImGui::TextWrapped("%s", m_WrongGame.c_str());
+        else
+            ImGui::TextWrapped(
+                "This game version (%s) isn't compatible with HITMAN Co-op %s: the mod loader couldn't find %s in it. "
+                "Co-op stays off so nothing can break. Update the game, then get the HITMAN Co-op build made for it.",
+                m_GameVersion.c_str(), c_ModVersion, m_Unsupported.c_str());
         ImGui::PopStyleColor();
     }
 }
@@ -786,8 +1025,26 @@ void HitmanCoop::DrawPlayTab(const coop::SessionStatus& p_Status, bool p_InMissi
             if (!m_LanAddress.empty())
                 ImGui::TextDisabled("This PC on your network: %s", Hide(m_LanAddress).c_str());
 
-            if (!m_TailscaleAddress.empty())
-                ImGui::TextDisabled("Tailscale: %s", Hide(m_TailscaleAddress).c_str());
+            // (Refreshed on the game's thread every 15 s: copied under the lock.)
+            std::string s_Tailscale;
+            {
+                std::lock_guard s_Lock(m_StatusMutex);
+                s_Tailscale = m_TailscaleAddress;
+            }
+
+            if (!s_Tailscale.empty()) {
+                ImGui::TextDisabled("Tailscale: %s", Hide(s_Tailscale).c_str());
+                ImGui::SameLine();
+
+                // (The world's toasts belong to the game's thread: the copy is told there, as the join code's is.)
+                if (ImGui::SmallButton(ICON_MD_CONTENT_COPY "##HitmanCoopCopyTailscale")) {
+                    ImGui::SetClipboardText(s_Tailscale.c_str());
+                    m_TailscaleCopied = true;
+                }
+
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Copy your Tailscale address for your partner");
+            }
 
             ImGui::Spacing();
 
@@ -1189,6 +1446,10 @@ void HitmanCoop::DrawSettingsTab() {
         s_Changed |= ImGui::Checkbox("Pause together (my partner's pause menu pauses my game)", &m_PauseTogether);
         ImGui::BeginDisabled(!m_PauseTogether);
         s_Changed |= ImGui::Checkbox("...but not when they only look at their map, notebook or phone", &m_MapNoPause);
+        ImGui::SameLine();
+
+        if (ImGui::SmallButton(ICON_MD_VISIBILITY " Preview the pause screen"))
+            m_PausePreviewUntil = Now() + 6.0;
         ImGui::EndDisabled();
         s_Changed |= ImGui::Checkbox("Start together (hold my mission until my partner has loaded in, up to 90 s)", &m_WaitForPartner);
         s_Changed |= ImGui::Checkbox("Reconnect by myself when the connection drops", &m_AutoReconnect);
@@ -1278,9 +1539,28 @@ void HitmanCoop::DrawSettingsTab() {
     if (ImGui::CollapsingHeader(ICON_MD_TUNE " This window and NPCs")) {
         ImGui::SetNextItemWidth(s_Field);
         s_Changed |= ImGui::SliderFloat("Window text size", &m_WindowScale, 0.8f, 1.6f, "%.2fx");
-        s_Changed |= ImGui::Checkbox("Correct NPCs that drift from the host's", &m_CorrectNpcs);
-        ImGui::SetNextItemWidth(s_Field);
-        s_Changed |= ImGui::SliderFloat("Leave NPCs near me alone (metres)", &m_LocalBubble, 0.f, 60.f, "%.0f");
+    }
+
+    if (ImGui::CollapsingHeader(ICON_MD_DESCRIPTION " Log (for bug reports)")) {
+        static constexpr const char* c_Levels[] = { "Errors only", "Warnings", "Normal", "Verbose (for bug hunting)", "Everything (very large)" };
+        ImGui::SetNextItemWidth(s_Field * 1.5f);
+
+        if (ImGui::Combo("Log detail", &m_LogLevel, c_Levels, 5)) {
+            CoopLog::SetLevel(static_cast<coop::LogLevel>(m_LogLevel));
+            CoopLog::Fmt(coop::LogLevel::Info, "log", "log level now %s", coop::LogLevelName(static_cast<coop::LogLevel>(m_LogLevel)));
+            s_Changed = true;
+        }
+
+        HelpMarker("Normal: what happened, plus a health line every 10 s while you play together. Verbose adds why (who runs which "
+            "NPC, every NPC handed over). Everything adds each NPC on its own: only for chasing one bug.");
+
+        if (ImGui::Checkbox("Show IP addresses in the log", &m_LogAddresses)) {
+            CoopLog::SetShowAddresses(m_LogAddresses);
+            s_Changed = true;
+        }
+
+        HelpMarker("Off: addresses are written as 203.0.x.x, so the log is safe to post publicly.");
+        ImGui::TextDisabled("mods\\HitmanCoop.log (the previous session's: HitmanCoop-previous.log)");
     }
 
     if (s_Changed) {
@@ -1415,7 +1695,7 @@ void HitmanCoop::DrawAboutTab(const coop::SessionStatus& p_Status) {
     ImGui::TextColored(c_Red, "HITMAN CO-OP %s", c_ModVersion);
     ImGui::PopFont();
     ImGui::TextColored(c_Gold, ICON_MD_STAR " Created by %s", c_Author);
-    ImGui::TextDisabled("Protocol %u, game %s", coop::kProtocolVersion, m_GameVersion.c_str());
+    ImGui::TextDisabled("Protocol %u, game %s, build for game %s.x", coop::kProtocolVersion, m_GameVersion.c_str(), c_GameTarget);
     ImGui::Spacing();
     ImGui::TextWrapped("A fan-made two-player co-op mod for HITMAN World of Assassination. It isn't made, endorsed or supported by "
                        "IO Interactive. Use it at your own risk.");
@@ -1464,16 +1744,30 @@ void HitmanCoop::DrawAboutTab(const coop::SessionStatus& p_Status) {
         ImGui::SetClipboardText(Diagnostics(p_Status).c_str());
 
     HelpMarker("Versions, connection details and recent notifications, to paste into a bug report. No IP addresses.");
-    ImGui::TextDisabled("Log: mods\\HitmanCoop.log (the previous session's: HitmanCoop-previous.log).");
+    ImGui::SameLine();
+
+    if (ImGui::Button(ICON_MD_ARCHIVE " Save bug report"))
+        SaveBugReport(Diagnostics(p_Status));
+
+    HelpMarker("Puts the logs of this and the last session, any crash report, your settings and the diagnostics into one zip "
+        "(Retail\\mods\\HitmanCoop-reports) and shows it. Send that zip with your bug report, from both players' PCs.");
+
+    if (const std::string s_Report = BugReportResult(); !s_Report.empty())
+        ImGui::TextWrapped("%s", s_Report.c_str());
     ImGui::TextDisabled("Game patches: %s", CrashGuards::Report().c_str());
 }
 
 // Everything a bug report needs, for the clipboard (no addresses: it may be posted publicly).
 std::string HitmanCoop::Diagnostics(const coop::SessionStatus& p_Status) {
     std::ostringstream s_Out;
-    s_Out << "HITMAN Co-op " << c_ModVersion << " (protocol " << coop::kProtocolVersion << "), game " << m_GameVersion << "\n";
+    s_Out << "HITMAN Co-op " << c_ModVersion << " (protocol " << coop::kProtocolVersion << "), game " << m_GameVersion << ", build for game " << c_GameTarget << ".x\n";
     s_Out << "Game patches: " << CrashGuards::Report() << "\n";
     s_Out << "Pause control: " << (GamePause::Available() ? "found" : "not found") << "\n";
+    s_Out << "Online: " << OnlineWatch::Describe() << "\n";
+    {
+        std::lock_guard s_Lock(m_StatusMutex);
+        s_Out << "Tailscale: " << (m_TailscaleAddress.empty() ? "not connected" : "connected") << "\n";
+    }
     s_Out << "Session: " << coop::SessionStateName(p_Status.state) << (p_Status.role == coop::SessionRole::Host ? " (host)" :
         p_Status.role == coop::SessionRole::Client ? " (client)" : "") << ", synced " << (p_Status.synced ? "yes" : "no") << "\n";
     s_Out << "Partner: mod " << p_Status.peerModVersion << ", game " << p_Status.peerGameVersion << "\n";
@@ -1481,6 +1775,7 @@ std::string HitmanCoop::Diagnostics(const coop::SessionStatus& p_Status) {
     {
         std::lock_guard s_Lock(m_StatusMutex);
         s_Out << "Partner's 47: " << (m_StandInText.empty() ? "-" : m_StandInText) << "\n";
+        s_Out << "Items: " << (m_ItemText.empty() ? "-" : m_ItemText) << "\n";
     }
 
     char s_Line[256];
@@ -1491,6 +1786,18 @@ std::string HitmanCoop::Diagnostics(const coop::SessionStatus& p_Status) {
     std::snprintf(s_Line, sizeof(s_Line), "NPCs: %zu tracked, %zu puppets, %zu run by the client; mod cost %.2f ms a frame%s\n", p_Status.npcsTracked,
         p_Status.npcsPuppeted, p_Status.npcsOwnedByClient, static_cast<double>(m_ModCostMs.load()), m_SlowMode ? " (slow frames: less NPC work)" : "");
     s_Out << s_Line;
+
+    if (p_Status.npcCheck.at > 0.0) {
+        const auto& c = p_Status.npcCheck;
+        std::snprintf(s_Line, sizeof(s_Line), "Sync check: %zu NPCs in both games, %zu same place, %zu 1-5 m, %zu over 5 m, %zu only theirs, %zu only ours, %zu alive/down differ\n",
+            c.compared, c.same, c.fewMetres, c.outOfPlace, c.onlyTheirs, c.onlyOurs, c.lifeDiffers);
+        s_Out << s_Line;
+
+        if (!c.worst.empty())
+            s_Out << "  worst: " << c.worst << "\n";
+    }
+
+    s_Out << "Log level: " << coop::LogLevelName(CoopLog::Level()) << "\n";
     s_Out << "Recent notifications:\n";
 
     const auto s_History = m_World.CopyHistory();
@@ -1604,6 +1911,7 @@ void HitmanCoop::OnDrawUI(bool p_HasFocus) {
     DrawCompass(s_Overlay, s_Status);
     DrawHud(s_Status, s_InMission, s_Overlay, s_Reconnecting);
     DrawRadar(s_Overlay, s_Status, m_HudBottom);
+    DrawPauseScreen(s_Status);
     DrawCountdown();
     DrawSummary();
     DrawWhatsNew();

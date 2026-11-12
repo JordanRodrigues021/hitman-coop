@@ -6,11 +6,15 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 
 #pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "bcrypt.lib")
+
+#include "UpdateKey.h"
 #pragma comment(lib, "bcrypt.lib")
 
 namespace fs = std::filesystem;
@@ -218,6 +222,60 @@ Updater::~Updater() {
         m_Thread.join();
 }
 
+namespace {
+std::string FromBase64(const std::string& p_Text) {
+    static constexpr char c_Alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string s_Out;
+    uint32_t s_Bits = 0;
+    int s_Count = 0;
+
+    for (const char c : p_Text) {
+        const char* s_At = c ? std::strchr(c_Alphabet, c) : nullptr;
+
+        if (!s_At)
+            continue; // padding, line ends
+
+        s_Bits = (s_Bits << 6) | static_cast<uint32_t>(s_At - c_Alphabet);
+        s_Count += 6;
+
+        if (s_Count >= 8) {
+            s_Count -= 8;
+            s_Out += static_cast<char>((s_Bits >> s_Count) & 0xFF);
+        }
+    }
+
+    return s_Out;
+}
+}
+
+bool Updater::VerifySignature(const std::string& p_Text, const std::string& p_SignatureBase64) {
+    const std::string s_Signature = FromBase64(p_SignatureBase64);
+
+    if (s_Signature.size() != 64)
+        return false;
+
+    BCRYPT_ALG_HANDLE s_Sha = nullptr, s_Ecdsa = nullptr;
+    BCRYPT_KEY_HANDLE s_Key = nullptr;
+    UCHAR s_Hash[32] {};
+    bool s_Ok = false;
+
+    if (BCryptOpenAlgorithmProvider(&s_Sha, BCRYPT_SHA256_ALGORITHM, nullptr, 0) == 0 &&
+        BCryptHash(s_Sha, nullptr, 0, reinterpret_cast<PUCHAR>(const_cast<char*>(p_Text.data())), static_cast<ULONG>(p_Text.size()), s_Hash, sizeof(s_Hash)) == 0 &&
+        BCryptOpenAlgorithmProvider(&s_Ecdsa, BCRYPT_ECDSA_P256_ALGORITHM, nullptr, 0) == 0 &&
+        BCryptImportKeyPair(s_Ecdsa, nullptr, BCRYPT_ECCPUBLIC_BLOB, &s_Key, const_cast<PUCHAR>(c_UpdateKey), sizeof(c_UpdateKey), 0) == 0)
+        s_Ok = BCryptVerifySignature(s_Key, nullptr, s_Hash, sizeof(s_Hash), reinterpret_cast<PUCHAR>(const_cast<char*>(s_Signature.data())),
+                   static_cast<ULONG>(s_Signature.size()), 0) == 0;
+
+    if (s_Key)
+        BCryptDestroyKey(s_Key);
+    if (s_Ecdsa)
+        BCryptCloseAlgorithmProvider(s_Ecdsa, 0);
+    if (s_Sha)
+        BCryptCloseAlgorithmProvider(s_Sha, 0);
+
+    return s_Ok;
+}
+
 std::string Updater::Sha256(const std::string& p_Data) {
     BCRYPT_ALG_HANDLE s_Alg = nullptr;
     BCRYPT_HASH_HANDLE s_Hash = nullptr;
@@ -345,12 +403,13 @@ bool Updater::TakeWhatsNew(const std::string& p_GameDir, const std::string& p_Ve
     return true;
 }
 
-void Updater::Start(const std::string& p_GameDir, const std::string& p_Version, const std::string& p_ManifestUrl, const std::string& p_FallbackUrl) {
+void Updater::Start(const std::string& p_GameDir, const std::string& p_Version, const std::string& p_ManifestUrl, const std::string& p_FallbackUrl,
+    bool p_Reinstall) {
     if (m_Thread.joinable())
         return;
 
     Set(State::Checking);
-    m_Thread = std::thread(&Updater::Run, this, p_GameDir, p_Version, p_ManifestUrl, p_FallbackUrl);
+    m_Thread = std::thread(&Updater::Run, this, p_GameDir, p_Version, p_ManifestUrl, p_FallbackUrl, p_Reinstall);
 }
 
 Updater::Status Updater::Get() const {
@@ -363,19 +422,38 @@ void Updater::Set(State p_State, const std::string& p_Version, const std::string
     m_Status = { p_State, p_Version, p_Error };
 }
 
-void Updater::Run(std::string p_GameDir, std::string p_Version, std::string p_ManifestUrl, std::string p_FallbackUrl) {
+void Updater::Run(std::string p_GameDir, std::string p_Version, std::string p_ManifestUrl, std::string p_FallbackUrl, bool p_Reinstall) {
     std::string s_Text, s_Error;
     Manifest s_Manifest;
 
-    if (!HttpGet(p_ManifestUrl, s_Text, 256 * 1024, m_Stop, s_Error) &&
-        (p_FallbackUrl.empty() || !HttpGet(p_FallbackUrl, s_Text, 256 * 1024, m_Stop, s_Error)))
-        return Set(State::Failed, {}, s_Error);
+    std::string s_From = p_ManifestUrl;
+
+    if (!HttpGet(p_ManifestUrl, s_Text, 256 * 1024, m_Stop, s_Error)) {
+        s_From = p_FallbackUrl;
+
+        if (p_FallbackUrl.empty() || !HttpGet(p_FallbackUrl, s_Text, 256 * 1024, m_Stop, s_Error))
+            return Set(State::Failed, {}, s_Error);
+    }
 
     if (!Parse(s_Text, s_Manifest))
         return Set(State::Failed, {}, "update.txt isn't readable");
 
-    if (CompareVersions(s_Manifest.version, p_Version) <= 0)
+    // Never older; the same only to put in the build for this game version.
+    if (const int s_Cmp = CompareVersions(s_Manifest.version, p_Version); s_Cmp < 0 || (s_Cmp == 0 && !p_Reinstall))
         return Set(State::UpToDate, s_Manifest.version);
+
+    // Signed by the mod's author (update.txt.sig next to it, see tools/update-key.ps1): files are
+    // put into the game only from an update.txt nobody else could have written. (Local test
+    // servers, http://127.0.0.1, are let through unsigned.)
+    if (s_From.rfind("http://127.0.0.1", 0) != 0) {
+        std::string s_Signature;
+
+        if (!HttpGet(s_From + ".sig", s_Signature, 4096, m_Stop, s_Error))
+            return Set(State::Failed, s_Manifest.version, "update.txt isn't signed (" + s_Error + ")");
+
+        if (!VerifySignature(s_Text, s_Signature))
+            return Set(State::Failed, s_Manifest.version, "update.txt's signature doesn't match: not installed");
+    }
 
     // Every file that differs, downloaded and checked first: nothing is swapped unless all are.
     struct Staged {
@@ -419,6 +497,9 @@ void Updater::Run(std::string p_GameDir, std::string p_Version, std::string p_Ma
 
         s_Staged.push_back({ s_Target, s_Fresh });
     }
+
+    if (s_Staged.empty())
+        return Set(State::UpToDate, s_Manifest.version);
 
     // Swapped in: the running file renamed out of the way (Windows allows that for a loaded DLL),
     // the new one renamed in. Undone if any of them can't be.

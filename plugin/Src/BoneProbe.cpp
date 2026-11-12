@@ -1,5 +1,12 @@
 #include "BoneProbe.h"
 
+#if COOP_LEGACY_SDK
+// The legacy build (game 3.240) has no ZMorpheme types; this research probe is left out of it.
+std::string BoneProbe::Dump(const char*, ZHM5BaseCharacter*, size_t) { return {}; }
+std::string BoneProbe::AnimatorTable(const char*, ZEntityRef) { return {}; }
+#else
+
+
 #include <Windows.h>
 
 #include <cstdio>
@@ -110,3 +117,5 @@ std::string BoneProbe::Dump(const char* p_Label, ZHM5BaseCharacter* p_Character,
 
     return s_Out;
 }
+
+#endif // COOP_LEGACY_SDK

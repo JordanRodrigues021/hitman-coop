@@ -14,7 +14,8 @@ namespace coop {
 // 9: chat, marks, loading notices, knock-outs, compact NPC snapshots.
 // 10: player status (alerts, menus, mission stats), mark kinds, what a loading partner loads.
 // 11: the host's mod version in Welcome, a player's colour and "away" in their status.
-constexpr uint32_t kProtocolVersion = 13;
+// 16: NPC poses carry only the bones that changed (MsgNpcPose); item and body rest places.
+constexpr uint32_t kProtocolVersion = 17;
 
 constexpr uint16_t kDefaultPort = 47047;
 constexpr size_t kMaxPacketSize = 1200;
@@ -54,6 +55,8 @@ enum class MsgType : uint8_t {
     Busy,
     NpcKnockedOut,
     PlayerState,
+    NpcCheck,
+    NpcClaim,
     Count,
 };
 
@@ -150,6 +153,17 @@ struct MsgSceneInfo {
     bool Read(ByteReader& r);
 };
 
+// Client to host: our 47 hit (shot, threw something at, struck) an NPC the host's game runs. The
+// hit lands in our game, where the NPC was a puppet whose own AI was off: it ignored knock-outs. The
+// client runs it from that moment (it is un-puppeted at once), and the host hands it over.
+struct MsgNpcClaim {
+    uint32_t epoch = 0;
+    uint64_t id = 0;
+
+    void Write(ByteWriter& w) const;
+    bool Read(ByteReader& r);
+};
+
 struct MsgSceneReady {
     uint32_t epoch = 0;
 
@@ -188,6 +202,28 @@ struct MsgVictimPose {
     bool Read(ByteReader& r);
 };
 
+// An NPC's skeleton pose, from the game that runs it, for its puppet in the other game. Most of
+// a walking NPC's 231 bones (face, fingers) hardly move, so after a full pose only the bones that
+// changed since what was last sent go (a bit for each bone says which). The receiver keeps the
+// last full pose and lays the changes over it; changes for a pose it hasn't got are dropped
+// until the next full one (sent every couple of seconds, and whenever an NPC is new to the sender).
+struct MsgNpcPose {
+    uint32_t epoch = 0;
+    uint32_t timeMs = 0;
+    uint64_t id = 0;
+    bool full = true;
+    uint16_t boneCount = 0;         // the whole skeleton's
+    Vec3 rootPos, pelvisPos;        // sent to the millimetre
+    std::vector<uint8_t> changed;   // !full: one bit a bone, (boneCount + 7) / 8 bytes
+    std::vector<Quat> rotations;    // full: every bone; else the changed ones, in bone order
+
+    // Lays this over p_Base (the receiver's last full pose of this NPC). False if it can't be.
+    bool ApplyTo(Pose& p_Base) const;
+
+    void Write(ByteWriter& w) const;
+    bool Read(ByteReader& r);
+};
+
 struct MsgOutfit {
     OutfitDesc outfit;
 
@@ -220,9 +256,12 @@ enum ItemFlags : uint8_t {
     ItemFlag_DoorOpen = 1 << 2,
     ItemFlag_DoorFromFront = 1 << 3, // the player was on the door's +Y side
     // Not an item but a body (id: the NPC's), moved in the sender's game since it went down
-    // (dragged, dumped) and at rest now, at xf. The receiver hides its own (see SdkWorld).
+    // (dragged, dumped) and at rest now, at xf. The receiver moves its own there (see SdkWorld).
     ItemFlag_Body = 1 << 4,
     ItemFlag_BodyHidden = 1 << 5, // put away there: in a closet, a container, over a ledge
+    // At rest: an item that stopped moving, or a body that came to lie still in the game it fell
+    // in. The receiver holds its copy there a while against its own physics.
+    ItemFlag_Rest = 1 << 6,
 };
 
 // An item from the scene (same entity id on both machines) that a player took, or put back into
@@ -283,6 +322,33 @@ struct NpcOwnership {
 constexpr size_t kMaxOwnershipsPerMsg = 96;
 
 // Host -> client: owners that changed (an NPC not listed yet is the host's). Reliable.
+// Every 10 s, where the sender's game has each NPC it lists (those it runs and those it plays as
+// the receiver's puppets), so the receiver can measure how far apart the two games are. Only
+// logged and shown (CO-OP > Diagnostics); unreliable, in parts of kMaxNpcChecksPerMsg.
+constexpr size_t kMaxNpcChecksPerMsg = 48;
+enum NpcCheckFlags : uint8_t {
+    NpcCheck_Alive = 1 << 0,
+    NpcCheck_Pacified = 1 << 1,
+    NpcCheck_SenderRuns = 1 << 2,  // the sender's game runs it (its AI); else it's the receiver's
+    NpcCheck_Puppet = 1 << 3,      // the sender plays it from the receiver's stream now
+};
+struct NpcCheckEntry {
+    uint64_t id = 0;
+    Vec3 pos;
+    uint8_t flags = 0;
+};
+struct MsgNpcCheck {
+    uint32_t epoch = 0;
+    uint16_t round = 0;  // which check this part belongs to
+    uint8_t part = 0;
+    uint8_t parts = 1;
+    uint16_t total = 0;  // NPCs in the whole check
+    std::vector<NpcCheckEntry> npcs;
+
+    void Write(ByteWriter& w) const;
+    bool Read(ByteReader& r);
+};
+
 struct MsgNpcOwners {
     uint32_t epoch = 0;
     std::vector<NpcOwnership> owners;

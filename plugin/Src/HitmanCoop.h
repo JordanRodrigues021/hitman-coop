@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <deque>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -46,10 +47,31 @@ public:
 
 private:
     static std::string ModsFolder();
+    // A "category: text" line at info level (see Log.h).
     void AppendLog(const std::string& p_Line);
     std::string m_LogPath;
-    size_t m_LogBytes = 0;
-    std::mutex m_LogMutex;
+    int m_LogLevel = static_cast<int>(coop::LogLevel::Info); // [log] level (the UI changes it, the game thread reads it)
+    bool m_LogAddresses = false;
+    void WriteLogHeader(int p_Patches);
+    static std::string FileVersionOf(const std::string& p_Path);
+    // The 10-second performance line (frame time, what the mod costs, the AI it skips).
+    void LogPerf(double p_Now, double p_FrameGap, double p_ModMs);
+    struct PerfWindow {
+        double since = -1.0;
+        uint32_t frames = 0;
+        double frameSum = 0.0, frameMax = 0.0;
+        double modSum = 0.0, modMax = 0.0;
+        uint32_t skippedThinks = 0;
+    } m_Perf;
+    // The bug report (CO-OP > About): logs, crash reports, settings and diagnostics in one zip.
+    void SaveBugReport(const std::string& p_Diagnostics);
+    std::string BugReportResult() const;
+    // Shared with the thread zipping it, which may outlive us (the game closing meanwhile).
+    struct BugReportState {
+        std::mutex mutex;
+        std::string text;
+    };
+    std::shared_ptr<BugReportState> m_BugReport = std::make_shared<BugReportState>();
 
     void OnFrameUpdate(const SGameUpdateEvent& p_UpdateEvent);
     void ProcessCommands(double p_Now);
@@ -62,6 +84,11 @@ private:
     // (empty: all there). Co-op stays off with a message instead of crashing the game.
     static std::string MissingEngineParts();
     std::string m_Unsupported;
+    // Set when this build is for another game version than the one running (see c_GameTarget):
+    // co-op stays off then, instead of crashing on fields that moved.
+    std::string m_WrongGame;
+    bool m_AnyGameVersion = false; // [general] any_game_version=1 skips that check
+    std::string UnsupportedText() const;
 
     DECLARE_PLUGIN_DETOUR(HitmanCoop, bool, OnLoadScene, ZEntitySceneContext*, SSceneInitParameters&);
     DECLARE_PLUGIN_DETOUR(HitmanCoop, void, OnClearScene, ZEntitySceneContext*, bool p_FullyUnloadScene);
@@ -98,6 +125,14 @@ private:
     // Shots that hit the partner's stand-in since the last frame (no harm: their game decides).
     std::atomic<int> m_FriendlyHits { 0 };
     double m_FriendlyToldAt = -100.0;
+    // Steam account check sent to the partner this connection (see OnlineWatch).
+    bool m_AccountSent = false;
+    // [online] hide_partner_kills_from_game: the old way, dropping the game's own online events for
+    // NPCs killed only to match the partner's game. Off: never touch the game's online events
+    // (dropping them is the first suspect for "signed in on another computer").
+    std::atomic<bool> m_HidePartnerKills { false };
+    double m_NextTailscaleCheck = 0.0;
+    std::atomic<bool> m_TailscaleCopied { false };
 
     // Teamwork: ready checks, the 3-2-1 countdown, signals and "come to me" (as mission events).
     bool OnTeamEvent(const std::string& p_Name, const std::string& p_Json);
@@ -236,6 +271,7 @@ private:
     void DrawRadar(const SdkWorld::Overlay& p_Overlay, const coop::SessionStatus& p_Status, float p_Top);
     void DrawCompass(const SdkWorld::Overlay& p_Overlay, const coop::SessionStatus& p_Status);
     void DrawCountdown();
+    void DrawPauseScreen(const coop::SessionStatus& p_Status);
     void DrawSummary();
     void DrawWhatsNew();
     void DrawToasts();
@@ -266,8 +302,19 @@ private:
     int m_OverlayReady = 0;             // 1: we asked, waiting; 2: the partner asked us
     double m_OverlayPartnerStill = 0.0; // seconds the partner hasn't moved
     bool m_OverlayCanReconnect = false;
+    // The partner's menu holds our game: since how long, and how long until it goes on anyway.
+    bool m_OverlayPartnerHold = false;
+    bool m_OverlayOwnMenu = false; // our own pause menu is open (the game's screen then)
+    double m_OverlayPauseFor = 0.0;
+    double m_OverlayPauseLeft = 0.0;
+    // Render thread: the pause screen fading in and out, and what it said (kept while it fades).
+    float m_PauseFx = 0.f;
+    bool m_PauseWaiting = false;
+    std::string m_PauseTitle, m_PauseLine, m_PauseFoot;
+    std::atomic<double> m_PausePreviewUntil { -1.0 }; // Settings' preview button, the test channel's "pausescreen"
     std::string m_StandInText;          // for diagnostics: the partner's stand-in, and why it isn't shown
     double m_StandInTextAt = -1.0;
+    std::string m_ItemText;             // for diagnostics: what of the items is shared (see SdkWorld::ItemSyncTest)
     float m_HudBottom = 0.f;          // render thread: where the HUD ended this frame
     std::deque<float> m_PingHistory;  // render thread
     double m_PingSampleAt = 0.0;

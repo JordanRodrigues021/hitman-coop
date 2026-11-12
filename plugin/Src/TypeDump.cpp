@@ -1,5 +1,15 @@
 #include "TypeDump.h"
 
+#if COOP_LEGACY_SDK
+// The legacy build (game 3.240) has older reflection types; this test tool is left out of it.
+#include <fstream>
+
+void TypeDump::Write(const std::string&, const std::string& p_Path) {
+    std::ofstream(p_Path) << "Type dumps are not in the legacy (game 3.240) build.\n";
+}
+#else
+
+
 #include <algorithm>
 #include <cctype>
 #include <fstream>
@@ -85,3 +95,5 @@ void TypeDump::Write(const std::string& p_Filter, const std::string& p_Path) {
             s_File << "    input pin " << std::hex << s_Class->m_pInputPins[i].m_nPinID << std::dec << "\n";
     }
 }
+
+#endif // COOP_LEGACY_SDK

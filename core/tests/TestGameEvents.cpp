@@ -23,6 +23,11 @@ TEST(GameEvents_ReadFields) {
     const std::string s_Unicode = "{\"ActorName\":\"Andr\\u00e9 Beaul\\u00e9\"}";
     CHECK(String(s_Unicode, "ActorName", s) && PlainText(s) == "Andre Beaule");
     CHECK(PlainText("Andr\xC3\xA9 Beaul\xC3\xA9\x01!") == "Andre Beaule!");
+    // Beyond U+07FF: three UTF-8 bytes (were dropped), and a lone surrogate half as U+FFFD.
+    // (Backslashes escaped: MSVC turns \u in a raw string into the character itself.)
+    CHECK(String("{\"A\":\"O\\u2019Brien\"}", "A", s) && s == "O\xE2\x80\x99" "Brien");
+    CHECK(String("{\"A\":\"\\u7530\\u4E2D\"}", "A", s) && s == "\xE7\x94\xB0\xE4\xB8\xAD");
+    CHECK(String("{\"A\":\"x\\ud83dy\"}", "A", s) && s == "x\xEF\xBF\xBD" "y");
 }
 
 TEST(GameEvents_AwarenessAndThreat) {

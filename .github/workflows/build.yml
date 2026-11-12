@@ -12,6 +12,10 @@ jobs:
         steps:
             -   uses: actions/checkout@v4
 
+            -   name: Check the Linux installer
+                shell: bash
+                run: bash -n installer/installer.sh
+
             -   name: Build core and tests
                 run: |
                     cmake -S core -B core/build -G "Visual Studio 17 2022" -A x64
@@ -30,7 +34,7 @@ jobs:
         steps:
             -   uses: actions/checkout@v4
 
-            -   name: Fetch pinned ZHMModSDK v4.2.1 (SHA-256 checked)
+            -   name: Fetch pinned ZHMModSDK v4.2.1 and v4.1.1 (SHA-256 checked)
                 shell: pwsh
                 run: ./tools/fetch-sdk.ps1
 
@@ -47,6 +51,16 @@ jobs:
                 shell: pwsh
                 run: ./tools/check-dll.ps1
 
+            # The build for players on game 3.280, against ZHMModSDK v4.1.1 (the installer picks it).
+            -   name: Configure (game 3.280)
+                run: cmake -S . -B _build-3280 -G "Visual Studio 17 2022" -A x64 -DCOOP_SDK=4.1.1 -DZHMMODSDK_DEVPKG_DIR="${{ github.workspace }}/_deps/old-4.1.1/devpkg"
+
+            -   name: Build (game 3.280)
+                run: cmake --build _build-3280 --config RelWithDebInfo --target HitmanCoop
+
+            -   name: Install (game 3.280)
+                run: cmake --install _build-3280 --config RelWithDebInfo --prefix _build-3280/install
+
             -   name: Package
                 shell: pwsh
                 run: ./tools/package.ps1
@@ -57,4 +71,5 @@ jobs:
                     path: |
                         _dist/*.zip
                         _dist/*.exe
+                        _dist/*.tar.gz
                         _dist/*.sha256

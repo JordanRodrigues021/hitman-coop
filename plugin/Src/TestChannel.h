@@ -1,5 +1,7 @@
 #pragma once
 
+#include <fstream>
+#include <mutex>
 #include <string>
 
 // Lets an automated test drive the mod in the real game without touching the UI: commands are
@@ -27,12 +29,17 @@ public:
 
     bool StatusDue(double p_Now);
     void WriteStatus(const std::string& p_Json);
+    // A lifecycle line: to the mod's log (debug level), and so to the trace file when testing.
     void Trace(const std::string& p_Line);
+    // Straight to the trace file only (the per-second heartbeat, and the log's mirror).
+    void Raw(const std::string& p_Line);
 
     static std::string Escape(const std::string& p_Text);
 
 private:
     std::string m_Path;
+    std::ofstream m_TraceFile;
+    std::mutex m_TraceMutex;
     double m_NextPoll = 0.0;
     double m_NextStatus = 0.0;
 };

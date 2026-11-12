@@ -38,9 +38,15 @@ namespace CrashGuards {
     // p_Think: its AI reasoning still runs. It must run for its first moments: never run, its AI
     // record was never set up and other NPCs saw it as a murdered body (3.280.0 test).
     void SetKnowledge(void* p_Knowledge, bool p_Think = true);
+    // Each puppet's AI unit looked up again, from its runtime id now. An NPC's id can change while
+    // it is a puppet (the game hands ids out again): the skip list then held another NPC's unit,
+    // and that NPC stood about with its AI off, ignoring knock-outs. Actors p_Alive doesn't know any
+    // more are dropped. Returns how many entries changed.
+    size_t RefreshPuppetUnits(bool (*p_Alive)(void* p_Context, void* p_Actor), void* p_Context);
     bool IsStandInKnowledge(const void* p_Knowledge);
     // The partner's NPCs here (puppets): their AI reasoning is skipped too.
     void SetPuppet(void* p_Actor, bool p_Puppet);
+    bool IsPuppet(void* p_Actor);
     void ClearPuppets();
     size_t PuppetCount();
     // Lines the stand-in would have said, and alert levels it would have reached, since the start.

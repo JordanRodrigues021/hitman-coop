@@ -30,14 +30,16 @@
 #include <Glacier/ZAction.h>
 #include <Glacier/ZItem.h>
 #include <Glacier/ZInventory.h>
-#include <Glacier/ZWorldInventory.h>
 #include <Glacier/ZPhysics.h>
+#if !COOP_LEGACY_SDK // not in the 3.240 SDK: item copies are left out of the legacy build
+#include <Glacier/EDynamicEntityType.h>
+#include <Glacier/ZWorldInventory.h>
+#endif
 #include <Glacier/ZCameraEntity.h>
 #include <Glacier/ZCollision.h>
 #include <Glacier/ZApplicationEngineWin32.h>
 #include <Glacier/ZContentKitManager.h>
 #include <Glacier/ZDelegate.h>
-#include <Glacier/EDynamicEntityType.h>
 #include <Glacier/ZHitman5.h>
 #include <Glacier/ZModule.h>
 #include <Glacier/ZOutfit.h>
@@ -48,9 +50,11 @@
 #include <DirectXMath.h>
 
 namespace {
-// Knocked out NPCs, by actor name, from the game's Pacify events: IsPacified() stays false for a
-// knocked out NPC in 3.280.0 (and no actor state bit changes either).
-std::unordered_set<std::string> g_Pacified;
+// Knocked out NPCs, from the game's Pacify events: IsPacified() stays false for a knocked out NPC
+// in 3.280.0 (and no actor state bit changes either). By actor, not by name: every crowd NPC is a
+// "John Doe", and one knocked out made all of them count as down (the partner's game then knocked
+// them all out too).
+std::unordered_set<const void*> g_Pacified;
 }
 
 static constexpr size_t c_MaxToasts = 6;
@@ -107,6 +111,41 @@ void SdkWorld::OnSceneCleared() {
         m_PartnerUnseen.SetProperty("m_rActor", TEntityRef<ZActor>());
     }
 
+    // The same switch on bodies the partner put away (0.13.0 on): left pointing at its body, a
+    // restart rebuilt it and it read the torn-down actor. Players' games went down when the partner
+    // restarted, and on leaving the mission.
+    for (auto& s_Unseen : m_BodyUnseen) {
+        if (s_Unseen && s_Unseen.GetEntity()) {
+            s_Unseen.GetEntity()->Deactivate(0);
+            s_Unseen.SetProperty("m_rActor", TEntityRef<ZActor>());
+        }
+    }
+
+    m_BodyUnseen.clear();
+
+    // Copies of the partner's items, and the stand-in's, are the scene's: freed with it.
+    m_Copies.clear();
+    m_CopyByItem.clear();
+    m_DynamicTold.clear();
+    m_NearItems.clear();
+    m_ItemKeys.clear();
+    m_SceneItemKeys.clear();
+    m_ItemKeysReady = false;
+    m_PendingBodyOutfits.clear();
+    m_PendingSpawns.clear();
+    m_PendingSharedKills.clear();
+    {
+        // What the partner carries stays wanted (it is told only when it changes).
+        const std::string s_Hand = m_HandSlot.wanted, s_Back = m_BackSlot.wanted;
+        const int s_HandAttach = m_HandSlot.attach;
+        const bool s_HandWeapon = m_HandSlot.weapon;
+        m_HandSlot = { .wanted = s_Hand, .attach = s_HandAttach, .weapon = s_HandWeapon };
+        m_BackSlot = { .wanted = s_Back, .attach = 3 };
+    }
+    m_BackItem.clear();
+    m_BackItemSent.clear();
+    m_BackItemSentAt = -100.0;
+
     if (m_Trace)
         m_Trace("scene: cleared");
 
@@ -147,13 +186,14 @@ void SdkWorld::OnSceneCleared() {
     m_RestartAskedAt = -1.0;
     m_HasPartnerSentXf = false;
     m_Items.clear();
+    m_PinnedItems.clear();
     m_PeerHeldItems.clear();
     m_Bodies.clear();
-    // The scene owns the copy in the stand-in's hand and frees it with the stand-in.
-    m_StandInItem = {};
-    m_StandInItemShown.clear();
-    m_StandInItemTicket = 0;
-    m_StandInItemAskedAt = -1.0;
+    m_MovedBodies.clear();
+    m_DownForPartner.clear();
+    m_BodyDragTestId = 0;
+    // The scene owns the copies the stand-in carries and frees them with the stand-in (the slots
+    // were reset above, keeping only what the partner holds: asked for again in the next mission).
     m_HeldItem.clear();
     m_Doors.clear();
     m_DoorsFound = false;
@@ -623,6 +663,22 @@ void SdkWorld::UpdatePoses() {
 
     UpdateStandInItem();
 
+    // Once a second: the AI switched off for puppets still points at the right NPCs (see
+    // CrashGuards::RefreshPuppetUnits), and puppets gone from the scene are let go.
+    if (m_InScene && m_Now >= m_NextUnitCheck) {
+        m_NextUnitCheck = m_Now + 1.0;
+        std::unordered_set<void*> s_Alive;
+
+        for (const auto& [s_Id, s_Npc] : m_NpcsById)
+            if (s_Npc)
+                s_Alive.insert(s_Npc);
+
+        if (const size_t s_Changed = CrashGuards::RefreshPuppetUnits(
+                [](void* p_Set, void* p_Actor) { return static_cast<std::unordered_set<void*>*>(p_Set)->contains(p_Actor); }, &s_Alive);
+            s_Changed && m_Trace)
+            m_Trace("npc: " + std::to_string(s_Changed) + " puppet AI switches pointed again (an NPC's runtime id changed, or it left)");
+    }
+
     if (m_InScene) {
         if (auto s_Player = SDK()->GetLocalPlayer())
             s_Source = s_Player.m_pInterfaceRef->m_pMorphemeEntity.m_entityRef.QueryInterface<IBoneAnimator>();
@@ -694,6 +750,9 @@ void SdkWorld::UpdatePoses() {
     PoseHook::SetTarget(s_Target);
     PickLocalVictim();
     ApplyPendingPuppets();
+    UpdateBodyDragTest();
+    UpdateMovedBodies();
+    UpdateBodyProbe();
 }
 
 namespace {
@@ -707,6 +766,12 @@ void BonesToPose(const std::vector<PoseHook::Bone>& p_Bones, coop::Pose& p_Out) 
     for (size_t i = 0; i < p_Bones.size(); ++i) {
         const auto& s_R = p_Bones[i].rot;
         p_Out.rotations[i] = { s_R[0], s_R[1], s_R[2], s_R[3] };
+    }
+
+    // (A capture that came back short, a skeleton not ready yet: no root to read, not a crash.)
+    if (p_Bones.size() < 2) {
+        p_Out.rootPos = p_Out.pelvisPos = {};
+        return;
     }
 
     p_Out.rootPos = { p_Bones[0].pos[0], p_Bones[0].pos[1], p_Bones[0].pos[2] };
@@ -768,7 +833,7 @@ coop::Transform Rebase(const coop::Transform& p_Xf, const coop::Transform& p_Fro
 }
 
 bool Pacified(ZActor* p_Actor) {
-    return p_Actor->IsPacified() || g_Pacified.contains(p_Actor->m_sActorName.c_str());
+    return p_Actor->IsPacified() || g_Pacified.contains(p_Actor);
 }
 
 // IsDead() is true for a knocked out NPC too (3.280.0).
@@ -843,7 +908,8 @@ void SdkWorld::PickLocalVictim() {
             else if (s_Actor == m_LocalVictim && s_Down && (m_LocalVictimDownAt < 0.0 || m_Now - m_LocalVictimDownAt < 4.0) &&
                      s_Distance < 3.f)
                 s_Score = s_Distance - 5.f;
-            else if (!s_Down && s_Distance < 1.f)
+            // (A fist fight starts from a little further than a takedown.)
+            else if (!s_Down && s_Distance < 1.25f)
                 s_Score = s_Distance;
             else
                 continue;
@@ -990,7 +1056,18 @@ void SdkWorld::ShowRemoteVictim(uint64_t p_Id, const coop::Transform& p_Xf, cons
             s_Xf = Rebase(p_Xf, m_PartnerSentXf, ToTransform(s_Partner->GetObjectToWorldMatrix()));
     }
 
-    if (auto* s_Spatial = s_Ref.QueryInterface<ZSpatialEntity>(); s_Spatial && m_VictimTestApply != 1)
+    // A body (down here already) being dragged: a ragdoll set somewhere stays where it lies, and
+    // players saw the stand-in drag nothing while the body stayed put. It is pulled along instead
+    // (see PullBody), limp, as a dragged body is. Standing, it is placed and posed.
+    const bool s_Body = m_RemoteVictimDowned && CanMoveBodies();
+
+    if (s_Body) {
+        HoldBody(p_Id, s_Actor, s_Xf);
+        ++m_VictimPosesShown;
+        return;
+    }
+
+    if (auto* s_Spatial = s_Ref.QueryInterface<ZSpatialEntity>(); s_Spatial && m_VictimTestApply != 1 && !s_Body)
         s_Spatial->SetObjectToWorldMatrixFromEditor(ToMatrix(s_Xf));
 
     PoseToBones(p_Pose, m_RemoteVictimBones);
@@ -1004,11 +1081,25 @@ void SdkWorld::ShowRemoteVictim(uint64_t p_Id, const coop::Transform& p_Xf, cons
 
         if (PoseHook::NativePoseOf(s_Animator, s_Native) == 0 || s_Native.empty()) {
             PoseHook::SetPoseFor(s_Animator, {});
+
+            if (s_Body)
+                HoldBody(p_Id, s_Actor, s_Xf);
+
             return;
         }
 
-        m_RemoteVictimRigDiffer = CountDisagreeing(m_RemoteVictimBones, s_Native);
-        m_RemoteVictimRig = m_RemoteVictimRigDiffer <= 60 ? 1 : -1;
+        // (A body's own pose, lying, is nothing like the partner's drag of it: compared bone by bone
+        // it always "differed" and was dragged unposed. It is the same NPC as theirs, so the same
+        // skeleton: only its bone count is checked.)
+        if (m_RemoteVictimDowned && !m_VictimTest) {
+            m_RemoteVictimRigDiffer = static_cast<int>(s_Native.size() > m_RemoteVictimBones.size() ? s_Native.size() - m_RemoteVictimBones.size()
+                                                                                                     : m_RemoteVictimBones.size() - s_Native.size());
+            m_RemoteVictimRig = m_RemoteVictimRigDiffer == 0 ? 1 : -1;
+        }
+        else {
+            m_RemoteVictimRigDiffer = CountDisagreeing(m_RemoteVictimBones, s_Native);
+            m_RemoteVictimRig = m_RemoteVictimRigDiffer <= 60 ? 1 : -1;
+        }
 
         if (m_Trace)
             m_Trace("victim: " + std::string(s_Actor->m_sActorName.c_str()) + " skeleton " + (m_RemoteVictimRig > 0 ? "fits" : "differs") +
@@ -1026,6 +1117,9 @@ void SdkWorld::ShowRemoteVictim(uint64_t p_Id, const coop::Transform& p_Xf, cons
         PoseHook::SetPoseFor(s_Animator, m_RemoteVictimBones);
     else
         PoseHook::SetPoseFor(s_Animator, {});
+
+    if (s_Body)
+        HoldBody(p_Id, s_Actor, s_Xf);
 
     ++m_VictimPosesShown;
 }
@@ -1051,10 +1145,12 @@ void SdkWorld::ReleaseRemoteVictim() {
 
     m_RemoteVictimStilled = false;
 
-    // Already put down here: a body dragged keeps the pose it was left in, one that fell stays
-    // where it fell.
-    if (m_RemoteVictimDowned)
+    // Already put down here: a body dragged is let go of where the partner left it (its ragdoll
+    // back on there, see UpdateMovedBodies), one that fell stays where it fell.
+    if (m_RemoteVictimDowned) {
+        LetGoBody(m_RemoteVictimId);
         return;
+    }
 
     // Only brushed past it, its own AI takes over again; down (though never streamed so), put down.
     PoseHook::ClearPoseFor(AnimatorOf(s_Actor));
@@ -1065,6 +1161,7 @@ void SdkWorld::ReleaseRemoteVictim() {
 
 void SdkWorld::PutDown(ZActor* p_Actor, uint64_t p_Id, uint8_t p_Flags) {
     const bool s_Alive = (p_Flags & coop::NpcFlag_Alive) != 0;
+    m_DownForPartner.insert(p_Id);
 
     if (s_Alive)
         m_HeldDown.insert(p_Id);
@@ -1436,6 +1533,54 @@ private:
 };
 }
 
+uint64_t SdkWorld::NpcIdOf(ZActor* p_Actor) const {
+    if (!p_Actor || !m_InScene || p_Actor == m_PartnerActor)
+        return 0;
+
+    ZEntityRef s_Ref;
+    p_Actor->GetID(s_Ref);
+
+    if (!s_Ref || !s_Ref->GetType())
+        return 0;
+
+    const uint64_t s_Id = s_Ref->GetType()->m_nEntityID;
+    const auto s_It = m_NpcsById.find(s_Id);
+    return s_It != m_NpcsById.end() && s_It->second == p_Actor ? s_Id : 0;
+}
+
+bool SdkWorld::HitByOurPlayer(const void* p_HitInfo) const {
+    // Where SHitInfo keeps m_rWeaponOwner, looked up once in the game's type registry.
+    static int64_t s_Offset = -2;
+
+    if (s_Offset == -2) {
+        s_Offset = -1;
+        STypeID* s_Id = (*Globals::TypeRegistry)->GetTypeID(ZString("SHitInfo"));
+        const IType* s_Type = s_Id ? s_Id->GetTypeInfo() : nullptr;
+
+        if (s_Type && s_Type->IsClass()) {
+            const auto* s_Class = reinterpret_cast<const IClassType*>(s_Type);
+
+            for (uint16_t i = 0; i < s_Class->m_nProperties; ++i) {
+                const auto& s_Property = s_Class->m_pProperties[i];
+                const IType* s_FieldType = s_Property.m_propertyInfo.m_Type ? s_Property.m_propertyInfo.m_Type->GetTypeInfo() : nullptr;
+
+                if (s_Property.m_pszPropertyName && std::strcmp(s_Property.m_pszPropertyName, "m_rWeaponOwner") == 0 && s_FieldType &&
+                    s_FieldType->m_nTypeSize == sizeof(ZEntityRef))
+                    s_Offset = s_Property.m_propertyInfo.m_nExtraData;
+            }
+        }
+    }
+
+    auto s_Player = SDK()->GetLocalPlayer();
+
+    if (s_Offset < 0 || !p_HitInfo || !s_Player)
+        return false;
+
+    ZEntityRef s_Owner;
+    std::memcpy(&s_Owner, static_cast<const uint8_t*>(p_HitInfo) + s_Offset, sizeof(ZEntityRef));
+    return s_Owner.GetEntity() && s_Owner.GetEntity() == s_Player.m_entityRef.GetEntity();
+}
+
 std::string SdkWorld::KnockOutTest(uint32_t p_DeathType, uint32_t p_DeathContext) {
     ZActor* s_Actor = NearestNpc(nullptr);
 
@@ -1467,8 +1612,8 @@ std::string SdkWorld::KnockOutTest(uint32_t p_DeathType, uint32_t p_DeathContext
 bool SdkWorld::PacifyForPartner(ZActor* p_Actor) {
     // A real knock-out: a hit with eDT_PACIFY, as from a thrown object, so the game has it
     // unconscious (not dead, no "non-target killed"). Its events are dropped like a kill's.
-    m_PartnerKills.insert(p_Actor->m_sActorName.c_str());
-    g_Pacified.insert(p_Actor->m_sActorName.c_str());
+    NotePartnerVictim(p_Actor);
+    g_Pacified.insert(p_Actor);
     CrashGuards::SetPuppet(p_Actor, false); // its AI back first, for the game's own knock-out handling
 
     ReflectedValue s_Hit("SHitInfo");
@@ -1490,15 +1635,88 @@ bool SdkWorld::PacifyForPartner(ZActor* p_Actor) {
 void SdkWorld::NotePacified(const std::string& p_EventJson, bool p_Pacified) {
     const std::string c_Key = "\"ActorName\":\"";
 
-    if (const size_t s_At = p_EventJson.find(c_Key); s_At != std::string::npos) {
-        const size_t s_Start = s_At + c_Key.size();
-        const std::string s_Name = p_EventJson.substr(s_Start, p_EventJson.find('"', s_Start) - s_Start);
+    const size_t s_At = p_EventJson.find(c_Key);
 
-        if (p_Pacified)
-            g_Pacified.insert(s_Name);
-        else
-            g_Pacified.erase(s_Name);
+    if (s_At == std::string::npos)
+        return;
+
+    const size_t s_Start = s_At + c_Key.size();
+    const std::string s_Name = p_EventJson.substr(s_Start, p_EventJson.find('"', s_Start) - s_Start);
+
+    // The event names the NPC only by name, and many share theirs ("John Doe"): of those, the one
+    // that just went down (a knock-out) or lay knocked out (a kill), nearest our 47 (whose doing it
+    // nearly always is).
+    coop::Transform s_Local;
+    const bool s_HaveLocal = GetLocalAvatar(s_Local);
+    ZActor* s_Best = nullptr;
+    float s_BestDistance = 1e9f;
+
+    for (const auto& [s_Id, s_Actor] : m_NpcsById) {
+        if (!s_Actor || s_Name != s_Actor->m_sActorName.c_str() || !s_Actor->IsDead())
+            continue;
+
+        if (g_Pacified.contains(s_Actor) == p_Pacified)
+            continue;
+
+        coop::Transform s_Xf;
+        ZEntityRef s_Ref;
+        s_Actor->GetID(s_Ref);
+        const auto* s_Spatial = s_Ref.QueryInterface<ZSpatialEntity>();
+        const float s_Distance = s_Spatial && s_HaveLocal ? coop::Distance(ToTransform(s_Spatial->GetObjectToWorldMatrix()).pos, s_Local.pos) : 1e8f;
+
+        if (s_Distance < s_BestDistance) {
+            s_Best = s_Actor;
+            s_BestDistance = s_Distance;
+        }
     }
+
+    if (!s_Best)
+        return;
+
+    if (p_Pacified)
+        g_Pacified.insert(s_Best);
+    else
+        g_Pacified.erase(s_Best);
+}
+
+bool SdkWorld::SharedName(const std::string& p_Name) const {
+    if (p_Name.empty())
+        return true;
+
+    int s_Count = 0;
+
+    for (const auto& [s_Id, s_Actor] : m_NpcsById)
+        if (s_Actor && p_Name == s_Actor->m_sActorName.c_str() && ++s_Count > 1)
+            return true;
+
+    return p_Name == "John Doe" || p_Name == "Jane Doe";
+}
+
+void SdkWorld::NotePartnerVictim(ZActor* p_Actor) {
+    const std::string s_Name = p_Actor->m_sActorName.c_str();
+
+    // A name of its own picks out this NPC's events for good. A shared one, only the next event
+    // with it (its own Kill or Pacify, a moment later).
+    if (!SharedName(s_Name))
+        m_PartnerKills.insert(s_Name);
+    else
+        m_PendingSharedKills.emplace_back(s_Name, m_Now + 3.0);
+}
+
+void SdkWorld::AddPartnerKillKey(const std::string& p_Key, const std::string& p_EventJson) {
+    std::string s_Name;
+    coop::GameEvents::String(p_EventJson, "ActorName", s_Name);
+
+    // A shared name's repository id is shared too (the crowd's), so it isn't kept.
+    for (auto s_It = m_PendingSharedKills.begin(); s_It != m_PendingSharedKills.end(); ++s_It) {
+        if (s_It->first == s_Name) {
+            m_PendingSharedKills.erase(s_It);
+            return;
+        }
+    }
+
+    if (!p_Key.empty())
+        m_PartnerKills.insert(p_Key);
 }
 
 std::string SdkWorld::DescribeVictim() const {
@@ -2099,17 +2317,25 @@ void SdkWorld::ListNpcs(std::vector<coop::NpcState>& p_Out) const {
     // Disabled actors are pooled NPCs that haven't entered the mission yet (Paris has 30, parked
     // under the map). They aren't dead, so they're left out until the game enables them.
 
+    size_t s_Shared = 0, s_Disabled = 0;
+
     for (const auto& s_Entry : Globals::ActorManager->m_activatedActors) {
         ZActor* s_Actor = s_Entry.m_pInterfaceRef;
 
-        if (!s_Actor || s_Actor == m_PartnerActor || !s_Entry.m_entityRef || !s_Entry.m_entityRef->GetType() ||
-            !s_Actor->m_bEnabled)
+        if (!s_Actor || s_Actor == m_PartnerActor || !s_Entry.m_entityRef || !s_Entry.m_entityRef->GetType())
             continue;
+
+        if (!s_Actor->m_bEnabled) {
+            ++s_Disabled;
+            continue;
+        }
 
         const uint64_t s_Id = s_Entry.m_entityRef->GetType()->m_nEntityID;
 
-        if (s_IdCount[s_Id] > 1)
+        if (s_IdCount[s_Id] > 1) {
+            ++s_Shared;
             continue;
+        }
 
         const auto* s_Spatial = s_Entry.m_entityRef.QueryInterface<ZSpatialEntity>();
 
@@ -2128,6 +2354,18 @@ void SdkWorld::ListNpcs(std::vector<coop::NpcState>& p_Out) const {
 
         m_NpcsById[s_Id] = s_Actor;
         p_Out.push_back(s_State);
+    }
+
+    // What can't be shared at all, told when it changes: NPCs left out here are on their own in
+    // each game (a mission with many actors sharing an id has that many never in sync).
+    if (m_Now >= m_NextListLog && (p_Out.size() != m_ListLogged[0] || s_Shared != m_ListLogged[1] || s_Disabled != m_ListLogged[2]) &&
+        CoopLog::On(coop::LogLevel::Info)) {
+        m_NextListLog = m_Now + 10.0;
+        CoopLog::Fmt(coop::LogLevel::Info, "npcs", "%zu NPCs can be shared; %zu left out (actors sharing an id: they never sync), %zu not in the mission yet",
+            p_Out.size(), s_Shared, s_Disabled);
+        m_ListLogged[0] = p_Out.size();
+        m_ListLogged[1] = s_Shared;
+        m_ListLogged[2] = s_Disabled;
     }
 }
 
@@ -2388,6 +2626,7 @@ void SdkWorld::KillNpc(uint64_t p_Id) {
         m_Trace(s_Text);
     }
 
+    m_DownForPartner.insert(p_Id);
     KillForPartner(s_Actor, EDamageEvent::eDE_UNDEFINED, EDeathBehavior::eDB_IMPACT_ANIM);
 }
 
@@ -2397,7 +2636,7 @@ void SdkWorld::KillForPartner(ZActor* p_Actor, EDamageEvent p_Event, EDeathBehav
 
     // The partner's game already scored this one; ours drops the Kill event it raises (see
     // IsPartnerKillEvent). Without that a partner's knock-out counted as our non-target kill.
-    m_PartnerKills.insert(p_Actor->m_sActorName.c_str());
+    NotePartnerVictim(p_Actor);
 
     TEntityRef<IItem> s_Item;
     TEntityRef<ZSetpieceEntity> s_Setpiece;
@@ -2413,6 +2652,16 @@ bool SdkWorld::IsPartnerKillEvent(const std::string& p_EventJson, bool p_EvenTar
     for (const auto& s_Name : m_PartnerKills)
         if (!s_Name.empty() && p_EventJson.find("\"" + s_Name + "\"") != std::string::npos)
             return true;
+
+    // A crowd NPC the partner took down a moment ago: its own event (by its ActorName only).
+    if (!m_PendingSharedKills.empty()) {
+        std::string s_Name;
+
+        if (coop::GameEvents::String(p_EventJson, "ActorName", s_Name))
+            for (const auto& [s_Pending, s_Until] : m_PendingSharedKills)
+                if (s_Pending == s_Name && m_Now < s_Until)
+                    return true;
+    }
 
     return false;
 }
@@ -2462,39 +2711,8 @@ ItemList WorldItems(size_t* p_Offset = nullptr) {
     return {};
 }
 
-// Items placed in the scene share their entity id across machines; a few templates are placed
-// more than once, and those ids say nothing, so they aren't synced.
-template <class F>
-void ForEachSceneItem(F&& p_Do) {
-    const ItemList s_Items = WorldItems();
-
-    if (!s_Items.begin)
-        return;
-
-    std::unordered_map<uint64_t, int> s_Count;
-
-    const auto s_Usable = [](const TEntityRef<IItemBase>& p_Entry) {
-        return p_Entry.m_entityRef && p_Entry.m_entityRef.GetEntity() && p_Entry.m_entityRef->GetType();
-    };
-
-    for (auto* s_Entry = s_Items.begin; s_Entry != s_Items.end; ++s_Entry)
-        if (s_Usable(*s_Entry))
-            ++s_Count[s_Entry->m_entityRef->GetType()->m_nEntityID];
-
-    for (auto* s_It = s_Items.begin; s_It != s_Items.end; ++s_It) {
-        const auto& s_Entry = *s_It;
-
-        if (!s_Usable(s_Entry))
-            continue;
-
-        const uint64_t s_Id = s_Entry.m_entityRef->GetType()->m_nEntityID;
-
-        if (s_Count[s_Id] != 1)
-            continue;
-
-        if (auto* s_Item = s_Entry.m_entityRef.QueryInterface<ZHM5Item>())
-            p_Do(s_Id, s_Item, s_Entry.m_entityRef);
-    }
+bool ItemUsable(const TEntityRef<IItemBase>& p_Entry) {
+    return p_Entry.m_entityRef && p_Entry.m_entityRef.GetEntity() && p_Entry.m_entityRef->GetType();
 }
 
 // What an item of our 47's names as its owner: 47 itself, or its character or one of that's
@@ -2544,25 +2762,87 @@ struct Owner47 {
 };
 
 // Hidden: invisible and can't be picked up. Shown: both back.
-void SetItemShown(ZHM5Item* p_Item, bool p_Shown) {
+void SetItemShown(ZHM5Item* p_Item, ZEntityRef p_Ref, bool p_Shown) {
     if (p_Item->m_rGeomentity.m_entityRef)
         p_Item->m_rGeomentity.m_entityRef.SetProperty("m_bVisible", p_Shown);
 
-    // Some placed items are drawn through this switch rather than their geometry (players saw the
-    // ones on the table at the start of Freeform Training stay after the partner took them).
+    // Some items are drawn through their other geometry reference, or this switch rather than
+    // their geometry (players saw the ones on the table at the start of Freeform Training stay
+    // after the partner took them).
+    if (p_Item->m_pGeomEntity.m_entityRef && p_Item->m_pGeomEntity.m_entityRef != p_Item->m_rGeomentity.m_entityRef)
+        p_Item->m_pGeomEntity.m_entityRef.SetProperty("m_bVisible", p_Shown);
+
     if (p_Item->m_rItemVisible.m_entityRef)
         p_Item->m_rItemVisible.m_entityRef.SetProperty("m_bValue", p_Shown);
 
     if (p_Item->m_rItemPickupEnabled.m_entityRef)
         p_Item->m_rItemPickupEnabled.m_entityRef.SetProperty("m_bValue", p_Shown);
+
+    // And the item itself, where it has the switch (a no-op where it hasn't).
+    if (p_Ref)
+        p_Ref.SetProperty("m_bVisible", p_Shown);
 }
+
+uint64_t Mix(uint64_t p_A, uint64_t p_B) {
+    return (p_A ^ (p_B + 0x9E3779B97F4A7C15ull + (p_A << 6) + (p_A >> 2))) * 0x100000001B3ull;
+}
+}
+
+// A placed item's key: the place of its spawner in the scene (the same on both machines), with the
+// item's own id to tell a spawner's items apart. Else the item's own place, if it is in the scene's
+// tree itself. 0: not a placed item (ours, the partner's copies, an NPC's).
+uint64_t SdkWorld::ItemKeyOf(const ZEntityRef& p_Ref) const {
+    if (const auto s_It = m_ItemKeys.find(p_Ref.m_pObj); s_It != m_ItemKeys.end())
+        return s_It->second;
+
+    return 0;
+}
+
+// Every item in the world, with the id both games know it by: a placed item's key, the partner's
+// id for a copy of their item, else its own entity id when that is unique (our loadout, thrown
+// items). p_All: also items whose id says nothing to the partner (for what only we look at).
+template <class F>
+void SdkWorld::ForEachItem(F&& p_Do, bool p_All) const {
+    const ItemList s_Items = WorldItems();
+
+    if (!s_Items.begin)
+        return;
+
+    std::unordered_map<uint64_t, int> s_Count;
+
+    for (auto* s_Entry = s_Items.begin; s_Entry != s_Items.end; ++s_Entry)
+        if (ItemUsable(*s_Entry) && !m_ItemKeys.contains(s_Entry->m_entityRef.m_pObj))
+            ++s_Count[s_Entry->m_entityRef->GetType()->m_nEntityID];
+
+    for (auto* s_It = s_Items.begin; s_It != s_Items.end; ++s_It) {
+        const auto& s_Entry = *s_It;
+
+        if (!ItemUsable(s_Entry))
+            continue;
+
+        uint64_t s_Id = 0;
+
+        if (const auto s_Copy = m_CopyByItem.find(s_Entry.m_entityRef.m_pObj); s_Copy != m_CopyByItem.end())
+            s_Id = s_Copy->second;
+        else if (const uint64_t s_Key = ItemKeyOf(s_Entry.m_entityRef))
+            s_Id = s_Key;
+        else {
+            s_Id = s_Entry.m_entityRef->GetType()->m_nEntityID;
+
+            if (s_Count[s_Id] != 1 && !p_All)
+                continue;
+        }
+
+        if (auto* s_Item = s_Entry.m_entityRef.QueryInterface<ZHM5Item>())
+            p_Do(s_Id, s_Item, s_Entry.m_entityRef);
+    }
 }
 
 ZHM5Item* SdkWorld::FindItem(uint64_t p_Id, ZEntityRef& p_Ref) const {
     ZHM5Item* s_Found = nullptr;
 
-    ForEachSceneItem([&](uint64_t p_ItemId, ZHM5Item* p_Item, const ZEntityRef& p_ItemRef) {
-        if (p_ItemId == p_Id) {
+    ForEachItem([&](uint64_t p_ItemId, ZHM5Item* p_Item, const ZEntityRef& p_ItemRef) {
+        if (!s_Found && p_ItemId == p_Id) {
             s_Found = p_Item;
             p_Ref = p_ItemRef;
         }
@@ -2576,14 +2856,39 @@ void SdkWorld::CollectItemChanges(std::vector<coop::ItemChange>& p_Out) {
         return;
 
     m_NextItemScan = m_Now + 0.1;
+    HoldPinnedItems();
     CollectDoorChanges(p_Out);
     CollectBodyChanges(p_Out);
-    const Owner47 s_Owner;
+    RetryPeerBodyOutfits();
+    UpdateCopies();
 
-    if (s_Owner.refs.empty())
+    // What our 47 carries on its back, to the partner: on a change, and every 10 s (a partner who
+    // joins or loads in later gets it too).
+    LocalHeldItem();
+
+    if (m_BackItem != m_BackItemSent || m_Now - m_BackItemSentAt > 10.0) {
+        m_BackItemSent = m_BackItem;
+        m_BackItemSentAt = m_Now;
+        Tell("Coop_BackItem", m_BackItem.empty() ? std::string("-") : m_BackItem);
+    }
+
+    // Items wait for their keys (found with the doors, a few seconds in): before that both games
+    // would name them differently.
+    if (!m_ItemKeysReady)
         return;
 
-    ForEachSceneItem([&](uint64_t p_Id, ZHM5Item* p_Item, const ZEntityRef& p_Ref) {
+    const Owner47 s_Owner;
+    coop::Transform s_Local;
+
+    if (s_Owner.refs.empty() || !GetLocalAvatar(s_Local))
+        return;
+
+    std::unordered_set<uint64_t> s_Present;
+    std::unordered_map<uint64_t, coop::Vec3> s_Near;
+
+    ForEachItem([&](uint64_t p_Id, ZHM5Item* p_Item, const ZEntityRef& p_Ref) {
+        s_Present.insert(p_Id);
+
         if (m_PeerHeldItems.contains(p_Id))
             return;
 
@@ -2593,11 +2898,12 @@ void SdkWorld::CollectItemChanges(std::vector<coop::ItemChange>& p_Out) {
         if (s_Ours && (s_It == m_Items.end() || !s_It->second.ours)) {
             m_Items[p_Id] = { true, 0.0, {} };
             p_Out.push_back({ p_Id, coop::ItemFlag_Taken, {} });
+
+            if (m_Trace && m_SceneItemKeys.contains(p_Id))
+                m_Trace("item: " + ItemRepository(p_Item) + " taken by us, told to the partner");
+
             return;
         }
-
-        if (s_Ours || s_It == m_Items.end())
-            return;
 
         const auto* s_Spatial = p_Ref.QueryInterface<ZSpatialEntity>();
 
@@ -2605,16 +2911,46 @@ void SdkWorld::CollectItemChanges(std::vector<coop::ItemChange>& p_Out) {
             return;
 
         const coop::Transform s_Xf = ToTransform(s_Spatial->GetObjectToWorldMatrix());
+
+        // A placed item lying within reach, nobody's: watched, in case it is gone next time.
+        // (Placed items name their spawner as their owner.)
+        const bool s_Loose = !p_Item->m_pOwner || p_Item->m_pOwner.m_pObj == p_Item->m_rSpawner.m_pObj;
+
+        if (!s_Ours && s_Loose && m_SceneItemKeys.contains(p_Id) && coop::Distance(s_Xf.pos, s_Local.pos) < 2.5f)
+            s_Near[p_Id] = s_Xf.pos;
+
+        if (s_Ours || s_It == m_Items.end())
+            return;
+
         auto& s_Tracked = s_It->second;
 
-        // Let go of (dropped, placed, thrown): back in the world, followed while it moves.
+        // Let go of (dropped, placed, thrown): back in the world, followed while it moves. One the
+        // partner's game doesn't have (from our loadout, say) is told with what it is, so a copy
+        // of it appears there.
         if (s_Tracked.ours) {
             s_Tracked = { false, m_Now + 4.0, s_Xf };
+
+            if (!m_SceneItemKeys.contains(p_Id) && !m_CopyByItem.contains(p_Ref.m_pObj)) {
+                if (const std::string s_Repo = ItemRepository(p_Item); !s_Repo.empty()) {
+                    char s_Text[256];
+                    std::snprintf(s_Text, sizeof(s_Text), "%llu %s %.4f %.4f %.4f %.5f %.5f %.5f %.5f", static_cast<unsigned long long>(p_Id),
+                        s_Repo.c_str(), s_Xf.pos.x, s_Xf.pos.y, s_Xf.pos.z, s_Xf.rot.x, s_Xf.rot.y, s_Xf.rot.z, s_Xf.rot.w);
+                    Tell("Coop_ItemSpawn", s_Text);
+                    m_DynamicTold[p_Id] = s_Repo;
+
+                    if (m_Trace)
+                        m_Trace("item: " + s_Repo + " (ours) let go of, a copy told to the partner");
+                }
+            }
+
             p_Out.push_back({ p_Id, 0, s_Xf });
             return;
         }
 
+        // Still a while: where it came to rest, told as that, so the partner's copy is held there
+        // against their own physics (it fell, rolled or slid its own way there).
         if (m_Now > s_Tracked.followUntil) {
+            p_Out.push_back({ p_Id, coop::ItemFlag_Rest, s_Xf });
             m_Items.erase(s_It);
             return;
         }
@@ -2625,6 +2961,35 @@ void SdkWorld::CollectItemChanges(std::vector<coop::ItemChange>& p_Out) {
             p_Out.push_back({ p_Id, 0, s_Xf });
         }
     });
+
+    // Placed items that were within reach and are gone from the world now: our 47 took them in a
+    // way that leaves no item (coins into a stack, say), or used them up. Taken for the partner too.
+    for (const auto& [s_Id, s_Pos] : m_NearItems) {
+        if (s_Present.contains(s_Id) || m_PeerHeldItems.contains(s_Id))
+            continue;
+
+        m_Items[s_Id] = { true, 0.0, {} };
+        p_Out.push_back({ s_Id, coop::ItemFlag_Taken, {} });
+
+        if (m_Trace)
+            m_Trace("item: " + std::to_string(s_Id) + " gone from beside our 47, taken for the partner too");
+    }
+
+    m_NearItems = std::move(s_Near);
+
+    // Our items told to the partner as copies, gone from the world since (used up, blown up, or
+    // picked up by us again): their copy goes too.
+    for (auto s_It = m_DynamicTold.begin(); s_It != m_DynamicTold.end();) {
+        if (s_Present.contains(s_It->first) && !(m_Items.contains(s_It->first) && m_Items[s_It->first].ours)) {
+            ++s_It;
+            continue;
+        }
+
+        if (!s_Present.contains(s_It->first))
+            p_Out.push_back({ s_It->first, coop::ItemFlag_Taken, {} });
+
+        s_It = m_DynamicTold.erase(s_It);
+    }
 }
 
 void SdkWorld::ResetItems() {
@@ -2633,12 +2998,26 @@ void SdkWorld::ResetItems() {
             ZEntityRef s_Ref;
 
             if (ZHM5Item* s_Item = FindItem(s_Id, s_Ref))
-                SetItemShown(s_Item, true);
+                SetItemShown(s_Item, s_Ref, true);
         }
+
+        // The partner's copies go with the partner.
+        std::vector<uint64_t> s_Copies;
+
+        for (const auto& [s_Id, s_Copy] : m_Copies)
+            s_Copies.push_back(s_Id);
+
+        for (const uint64_t s_Id : s_Copies)
+            RemoveCopy(s_Id);
     }
 
+    m_Copies.clear();
+    m_CopyByItem.clear();
+    m_DynamicTold.clear();
     m_PeerHeldItems.clear();
     m_Items.clear();
+    m_NearItems.clear();
+    m_PinnedItems.clear();
 }
 
 void SdkWorld::ApplyPeerItem(const coop::ItemChange& p_Change) {
@@ -2655,6 +3034,20 @@ void SdkWorld::ApplyPeerItem(const coop::ItemChange& p_Change) {
         return;
     }
 
+    // Keys first (see FindDoors): an item is named by them.
+    if (!m_DoorsFound)
+        FindDoors();
+
+    // A copy of the partner's own item that hasn't appeared yet: where it is going to be.
+    if (const auto s_Copy = m_Copies.find(p_Change.id); s_Copy != m_Copies.end() && !s_Copy->second.item) {
+        if (p_Change.Taken())
+            RemoveCopy(p_Change.id);
+        else
+            s_Copy->second.xf = p_Change.xf;
+
+        return;
+    }
+
     ZEntityRef s_Ref;
     ZHM5Item* s_Item = FindItem(p_Change.id, s_Ref);
 
@@ -2666,17 +3059,24 @@ void SdkWorld::ApplyPeerItem(const coop::ItemChange& p_Change) {
         return;
 
     if (p_Change.Taken()) {
+        // Their item, gone from their world: its copy here goes for good.
+        if (m_Copies.contains(p_Change.id)) {
+            RemoveCopy(p_Change.id);
+            return;
+        }
+
         m_PeerHeldItems.insert(p_Change.id);
-        SetItemShown(s_Item, false);
+        m_NearItems.erase(p_Change.id);
+        SetItemShown(s_Item, s_Ref, false);
 
         if (m_Trace)
-            m_Trace("item: " + std::to_string(p_Change.id) + " taken by the partner");
+            m_Trace("item: " + ItemRepository(s_Item) + " (" + std::to_string(p_Change.id) + ") taken by the partner");
 
         return;
     }
 
     if (m_PeerHeldItems.erase(p_Change.id)) {
-        SetItemShown(s_Item, true);
+        SetItemShown(s_Item, s_Ref, true);
 
         if (m_Trace)
             m_Trace("item: " + std::to_string(p_Change.id) + " put back by the partner");
@@ -2684,6 +3084,206 @@ void SdkWorld::ApplyPeerItem(const coop::ItemChange& p_Change) {
 
     if (auto* s_Spatial = s_Ref.QueryInterface<ZSpatialEntity>())
         s_Spatial->SetObjectToWorldMatrixFromEditor(ToMatrix(p_Change.xf));
+
+    // Held there a moment against our own physics: between the partner's words it fell, rolled or
+    // slid its own way here, and players found items lying in different places. At rest there, a
+    // couple of seconds more.
+    m_PinnedItems[p_Change.id] = { p_Change.xf, m_Now + ((p_Change.flags & coop::ItemFlag_Rest) ? 2.5 : 0.5) };
+}
+
+void SdkWorld::HoldPinnedItems() {
+    if (m_PinnedItems.empty())
+        return;
+
+    const Owner47 s_Owner;
+
+    for (auto s_It = m_PinnedItems.begin(); s_It != m_PinnedItems.end();) {
+        ZEntityRef s_Ref;
+        ZHM5Item* s_Item = m_Now < s_It->second.until ? FindItem(s_It->first, s_Ref) : nullptr;
+
+        // Done, gone, or in someone's hands (ours, or the partner's again).
+        if (!s_Item || s_Owner.Has(s_Item->m_pOwner) || m_PeerHeldItems.contains(s_It->first)) {
+            s_It = m_PinnedItems.erase(s_It);
+            continue;
+        }
+
+        if (auto* s_Spatial = s_Ref.QueryInterface<ZSpatialEntity>()) {
+            const coop::Transform s_Is = ToTransform(s_Spatial->GetObjectToWorldMatrix());
+
+            if (coop::Distance(s_Is.pos, s_It->second.xf.pos) > 0.02f || coop::AngleBetween(s_Is.rot, s_It->second.xf.rot) > 0.03f)
+                s_Spatial->SetObjectToWorldMatrixFromEditor(ToMatrix(s_It->second.xf));
+        }
+
+        ++s_It;
+    }
+}
+
+void SdkWorld::ApplyPeerItemSpawn(const std::string& p_Text) {
+    if (!m_InScene)
+        return;
+
+    std::istringstream s_In(p_Text);
+    unsigned long long s_Id = 0;
+    std::string s_Repo;
+    coop::Transform s_Xf;
+
+    if (!(s_In >> s_Id >> s_Repo >> s_Xf.pos.x >> s_Xf.pos.y >> s_Xf.pos.z >> s_Xf.rot.x >> s_Xf.rot.y >> s_Xf.rot.z >> s_Xf.rot.w))
+        return;
+
+    if (!std::isfinite(s_Xf.pos.x) || !std::isfinite(s_Xf.pos.y) || !std::isfinite(s_Xf.pos.z))
+        return;
+
+    s_Xf.rot = coop::Normalize(s_Xf.rot);
+
+    // Dropped again where a copy already is: it moves there (shown again, if it was picked up).
+    if (const auto s_It = m_Copies.find(s_Id); s_It != m_Copies.end()) {
+        auto& s_Copy = s_It->second;
+        s_Copy.xf = s_Xf;
+
+        if (s_Copy.item) {
+            if (auto* s_Item = s_Copy.item.QueryInterface<ZHM5Item>(); s_Item && !Owner47().Has(s_Item->m_pOwner)) {
+                SetItemShown(s_Item, s_Copy.item, true);
+                m_PeerHeldItems.erase(s_Id);
+
+                if (auto* s_Spatial = s_Copy.item.QueryInterface<ZSpatialEntity>())
+                    s_Spatial->SetObjectToWorldMatrixFromEditor(ToMatrix(s_Xf));
+            }
+        }
+
+        return;
+    }
+
+    // A few dozen at most (a player throwing every coin they have).
+    if (m_Copies.size() >= 48)
+        return;
+
+    // Made the way the stand-in's own items are (the game's world inventory, for an actor), then
+    // let go of where the partner's lies. The item spawner the SDK's Assets mod uses isn't loaded
+    // in every mission (Freeform Training), and nothing came of it there.
+    ZEntityRef s_ActorRef = m_PartnerActor && m_PartnerActor->m_pInventoryHandler ? m_PartnerActor->m_pInventoryHandler->m_rActor.m_entityRef : ZEntityRef();
+
+    if (!s_ActorRef || !Globals::WorldInventory) {
+        if (m_PendingSpawns.size() < 48 &&
+            std::none_of(m_PendingSpawns.begin(), m_PendingSpawns.end(), [&](const auto& p_Pending) { return p_Pending.second == p_Text; }))
+            m_PendingSpawns.emplace_back(m_Now + 10.0, p_Text);
+
+        return;
+    }
+
+    const uint64_t s_NewId = Functions::ZEntityManager_GenerateDynamicObjectID->Call(Globals::EntityManager, s_ActorRef,
+        EDynamicEntityType::eDET_CharacterInventoryItem, 0);
+    const ZMemberDelegate<SdkWorld, void(uint32_t, TEntityRef<IItemBase>)> s_Delegate(this, &SdkWorld::OnCopyCreated);
+    const uint32_t s_Ticket = Functions::ZWorldInventory_RequestNewItem->Call(Globals::WorldInventory, ZRepositoryID(ZString(s_Repo)),
+        s_Delegate, s_NewId, false, {}, s_ActorRef);
+
+    if (s_Ticket == *Globals::WorldInventory_InvalidTicket) {
+        if (m_Trace)
+            m_Trace("item: the partner's " + s_Repo + " can't be made here");
+
+        return;
+    }
+
+    auto& s_Copy = m_Copies[s_Id];
+    s_Copy.ticket = s_Ticket;
+    s_Copy.xf = s_Xf;
+    s_Copy.repo = s_Repo;
+    s_Copy.askedAt = m_Now;
+
+    if (m_Trace)
+        m_Trace("item: the partner let go of their " + s_Repo + ", a copy asked for here");
+}
+
+void SdkWorld::OnCopyCreated(uint32_t p_Ticket, TEntityRef<IItemBase> p_Item) {
+    auto s_It = std::find_if(m_Copies.begin(), m_Copies.end(), [&](const auto& p_Copy) { return p_Ticket && p_Copy.second.ticket == p_Ticket; });
+
+    if (s_It == m_Copies.end() || !p_Item.m_entityRef) {
+        // Given up on meanwhile: not left lying at the world's origin.
+        if (p_Item.m_entityRef && Globals::WorldInventory)
+            Functions::ZWorldInventory_DestroyItem->Call(Globals::WorldInventory, p_Item);
+
+        return;
+    }
+
+    auto& s_Copy = s_It->second;
+    s_Copy.ticket = 0;
+    s_Copy.item = p_Item.m_entityRef;
+    m_CopyByItem[s_Copy.item.m_pObj] = s_It->first;
+
+    // Into the world (its physics on), where the partner's lies.
+    if (m_PartnerActor)
+        m_PartnerActor->ReleaseItem(TEntityRef<IItem>(p_Item.m_entityRef), true);
+
+    if (auto* s_Spatial = s_Copy.item.QueryInterface<ZSpatialEntity>())
+        s_Spatial->SetObjectToWorldMatrixFromEditor(ToMatrix(s_Copy.xf));
+
+    if (auto* s_Item = s_Copy.item.QueryInterface<ZHM5Item>())
+        SetItemShown(s_Item, s_Copy.item, true);
+
+    if (m_Trace)
+        m_Trace("item: copy of the partner's " + s_Copy.repo + " in place");
+}
+
+// Copies waiting for the stand-in, tried again; copies that never came, given up.
+void SdkWorld::UpdateCopies() {
+    if (!m_PendingSpawns.empty()) {
+        const auto s_Pending = std::exchange(m_PendingSpawns, {});
+
+        for (const auto& [s_Until, s_Text] : s_Pending)
+            if (m_Now < s_Until)
+                ApplyPeerItemSpawn(s_Text);
+
+        // Put back ones keep their first deadline.
+        for (auto& s_Requeued : m_PendingSpawns)
+            for (const auto& [s_Until, s_Text] : s_Pending)
+                if (s_Text == s_Requeued.second)
+                    s_Requeued.first = s_Until;
+    }
+
+    for (auto s_It = m_Copies.begin(); s_It != m_Copies.end();) {
+        if (!s_It->second.item && m_Now - s_It->second.askedAt > 10.0) {
+            if (m_Trace)
+                m_Trace("item: the partner's " + s_It->second.repo + " never came here, given up");
+
+            s_It = m_Copies.erase(s_It);
+        }
+        else
+            ++s_It;
+    }
+}
+
+void SdkWorld::RemoveCopy(uint64_t p_Id) {
+    const auto s_It = m_Copies.find(p_Id);
+
+    if (s_It == m_Copies.end())
+        return;
+
+    if (s_It->second.item) {
+        m_CopyByItem.erase(s_It->second.item.m_pObj);
+
+        // Not if our 47 has it now: then it is ours.
+        if (auto* s_Item = s_It->second.item.QueryInterface<ZHM5Item>(); s_Item && !Owner47().Has(s_Item->m_pOwner)) {
+            SetItemShown(s_Item, s_It->second.item, false);
+
+            if (Globals::WorldInventory)
+                Functions::ZWorldInventory_DestroyItem->Call(Globals::WorldInventory, TEntityRef<IItemBase>(s_It->second.item));
+        }
+    }
+
+    m_PeerHeldItems.erase(p_Id);
+    m_Copies.erase(s_It);
+}
+
+std::string SdkWorld::ItemSyncTest() const {
+    size_t s_Keyed = 0, s_Unkeyed = 0;
+
+    ForEachItem([&](uint64_t p_Id, ZHM5Item*, const ZEntityRef&) {
+        (m_SceneItemKeys.contains(p_Id) ? s_Keyed : s_Unkeyed)++;
+    }, true);
+
+    return "items: keys " + std::string(m_ItemKeysReady ? "ready" : "not yet") + ", " + std::to_string(m_SceneItemKeys.size()) + " placed keyed, " +
+        std::to_string(s_Keyed) + " present keyed, " + std::to_string(s_Unkeyed) + " other, " + std::to_string(m_PeerHeldItems.size()) +
+        " held by the partner, " + std::to_string(m_Copies.size()) + " copies of theirs, " + std::to_string(m_DynamicTold.size()) +
+        " of ours told, " + std::to_string(m_NearItems.size()) + " within reach, back [" + m_BackItem + "]";
 }
 
 namespace {
@@ -2711,6 +3311,684 @@ void SdkWorld::AgreeBody(uint64_t p_Id, ZActor* p_Actor) {
     s_Body.stillSince = m_Now;
 }
 
+// ---- Bodies moved to where the partner has theirs ---------------------------------------------
+// A body is a ragdoll, and nothing set on it from outside moves it (its matrix set once or every
+// frame, with its ragdoll off or on, revived and placed: tried in game, 3.290.1, 2026-11-03; it
+// never left the spot). Pushes on its ragdoll do move it, so it is pulled there physically: each
+// frame, a push on its main bones towards where it should be, at walking pace, easing off as it
+// arrives (and against the speed it already has, so it doesn't overshoot or fly). Dragged by the
+// partner it follows their stand-in limp, as a dragged body is.
+
+namespace {
+constexpr uint32_t c_PullBones = 12;     // the ragdoll's main bones (pelvis, spine, limbs' roots)
+constexpr float c_PullGain = 3.f;        // push per bone for each m/s of speed wanted, at 60 fps
+}
+
+bool SdkWorld::CanMoveBodies() const {
+    return m_BodyMoveMode != 2 && !m_BodiesStuck && Functions::ZRagdollHandler_ApplyImpulseOnRagdoll->Exists();
+}
+
+float SdkWorld::PullBody(MovedBody& p_Body, float p_Dt) {
+    coop::Transform s_Is;
+
+    if (!ActorTransform(p_Body.actor, s_Is))
+        return 99.f;
+
+    // Its speed, from where it was last frame, smoothed over ~80 ms whatever the frame rate (a
+    // ragdoll's root jitters; a fixed half-and-half blend was jumpy at 144 fps and sluggish at 30).
+    if (p_Body.hasPrev && p_Dt > 0.f) {
+        const coop::Vec3 s_Inst = (s_Is.pos - p_Body.prev) * (1.f / p_Dt);
+        const float s_Blend = 1.f - std::exp(-p_Dt / 0.08f);
+        p_Body.vel = p_Body.vel + (s_Inst - p_Body.vel) * s_Blend;
+    }
+
+    p_Body.prev = s_Is.pos;
+    p_Body.hasPrev = true;
+
+    // Held by the partner: where their body is heading a moment from now (it moves on while ours
+    // catches up), but never more than half a metre ahead.
+    coop::Vec3 s_Target = p_Body.want.pos;
+
+    if (p_Body.stage == MovedBody::Held && p_Body.wantAt >= 0.0) {
+        coop::Vec3 s_Lead = p_Body.wantVel * 0.12f;
+        s_Lead.z = 0.f;
+
+        if (const float s_Len = std::sqrt(s_Lead.x * s_Lead.x + s_Lead.y * s_Lead.y); s_Len > 0.5f)
+            s_Lead = s_Lead * (0.5f / s_Len);
+
+        s_Target = s_Target + s_Lead;
+    }
+
+    const coop::Vec3 s_Err = s_Target - s_Is.pos;
+    const float s_Flat = std::sqrt(s_Err.x * s_Err.x + s_Err.y * s_Err.y);
+    const float s_Off = coop::Distance(s_Is.pos, p_Body.want.pos);
+    ZRagdollHandler* s_Ragdoll = p_Body.actor->m_pRagdollHandler;
+
+    if (!s_Ragdoll || p_Dt <= 0.f || p_Body.stage == MovedBody::Waiting)
+        return s_Off;
+
+    // The speed wanted: towards the place, at most a brisk drag, nothing once there.
+    const float s_Top = p_Body.drag ? 3.5f : 2.5f;
+    coop::Vec3 s_Want {};
+
+    if (s_Flat > 0.12f) {
+        const float s_Speed = std::min(4.f * s_Flat, s_Top);
+        s_Want = { s_Err.x / s_Flat * s_Speed, s_Err.y / s_Flat * s_Speed, 0.f };
+    }
+
+    coop::Vec3 s_Change = { s_Want.x - p_Body.vel.x, s_Want.y - p_Body.vel.y, 0.f };
+    const float s_ChangeLen = std::sqrt(s_Change.x * s_Change.x + s_Change.y * s_Change.y);
+
+    if (s_ChangeLen > 2.f)
+        s_Change = s_Change * (2.f / s_ChangeLen);
+
+    // Up a step or a stair: a little lift while the place is higher (never a throw). Caught on
+    // something (a railing, a low wall, a chair) for a while: a short hop at a set rising speed (the
+    // controller stops pushing once it rises that fast, so it can't fling the body).
+    if (m_Now < p_Body.hopUntil)
+        s_Change.z = std::clamp(1.6f - p_Body.vel.z, 0.f, 1.2f);
+    else if (s_Err.z > 0.25f && s_Flat < 2.5f)
+        s_Change.z = std::clamp(std::min(2.f, s_Err.z * 3.f) - p_Body.vel.z, 0.f, 1.5f);
+
+    const float s_Gain = c_PullGain * std::clamp(p_Dt * 60.f, 0.25f, 3.f);
+    // Pushed near its root: pushes far from a bone turn it, and a body pushed 0.3 m up its back
+    // tumbled and flailed on the way.
+    const float4 s_At(s_Is.pos.x, s_Is.pos.y, s_Is.pos.z + m_PullLever, 1.f);
+    const float4 s_Push(s_Change.x * s_Gain, s_Change.y * s_Gain, s_Change.z * s_Gain, 0.f);
+
+    for (uint32_t b = 0; b < std::min<uint32_t>(m_PullBoneCount, c_PullBones); ++b)
+        Functions::ZRagdollHandler_ApplyImpulseOnRagdoll->Call(s_Ragdoll, s_At, s_Push, b, false);
+
+    return s_Off;
+}
+
+void SdkWorld::HoldBody(uint64_t p_Id, ZActor* p_Actor, const coop::Transform& p_Xf) {
+    if (!p_Actor || !m_InScene || !CanMoveBodies())
+        return;
+
+    auto& s_Body = m_MovedBodies[p_Id];
+
+    if (s_Body.actor != p_Actor) {
+        s_Body = {};
+        s_Body.actor = p_Actor;
+        s_Body.since = s_Body.progressAt = m_Now;
+        coop::Transform s_Was;
+        ActorTransform(p_Actor, s_Was);
+        s_Body.startOff = coop::Distance(s_Was.pos, p_Xf.pos);
+        s_Body.startPos = s_Was.pos;
+
+        if (m_Trace) {
+            char s_Text[200];
+            std::snprintf(s_Text, sizeof(s_Text), "body: %s in the partner's hands, pulled along with their drag (%.1f m from ours)",
+                p_Actor->m_sActorName.c_str(), s_Body.startOff);
+            m_Trace(s_Text);
+        }
+    }
+
+    // Picked up again (by the partner) while it settled.
+    if (s_Body.stage != MovedBody::Held) {
+        s_Body.stage = MovedBody::Held;
+        s_Body.since = s_Body.progressAt = m_Now;
+        s_Body.bestOff = 1e9f;
+        s_Body.hops = 0;
+    }
+
+    // The drag's own speed (smoothed: the stream comes in steps).
+    if (s_Body.wantAt >= 0.0 && m_Now - s_Body.wantAt > 0.005) {
+        const float s_Dt = static_cast<float>(std::min(m_Now - s_Body.wantAt, 0.25));
+        const coop::Vec3 s_Inst = (p_Xf.pos - s_Body.wantPrev) * (1.f / s_Dt);
+        s_Body.wantVel = s_Body.wantVel + (s_Inst - s_Body.wantVel) * 0.3f;
+    }
+
+    if (s_Body.wantAt < 0.0 || m_Now - s_Body.wantAt > 0.005) {
+        s_Body.wantPrev = p_Xf.pos;
+        s_Body.wantAt = m_Now;
+    }
+
+    // Shown again if it was being moved out of sight: someone is dragging it now.
+    if (s_Body.hiddenMove) {
+        s_Body.hiddenMove = false;
+        ZEntityRef s_Ref;
+        p_Actor->GetID(s_Ref);
+        s_Ref.SetProperty("m_bVisible", true);
+    }
+
+    s_Body.drag = true;
+    s_Body.lastHeld = m_Now;
+    s_Body.want = p_Xf;
+}
+
+void SdkWorld::LetGoBody(uint64_t p_Id) {
+    const auto s_It = m_MovedBodies.find(p_Id);
+
+    if (s_It == m_MovedBodies.end() || s_It->second.stage != MovedBody::Held)
+        return;
+
+    s_It->second.stage = MovedBody::Settling;
+    s_It->second.since = s_It->second.progressAt = m_Now;
+    s_It->second.bestOff = 1e9f;
+    s_It->second.wantVel = {};
+
+    if (m_Trace)
+        m_Trace(std::string("body: ") + s_It->second.actor->m_sActorName.c_str() + " let go of by the partner");
+}
+
+bool SdkWorld::SomeoneNear(const coop::Vec3& p_Pos, float p_Range) const {
+    coop::Transform s_Local;
+
+    if (GetLocalAvatar(s_Local) && coop::Distance(s_Local.pos, p_Pos) < p_Range)
+        return true;
+
+    return m_HasPartnerSentXf && coop::Distance(m_PartnerSentXf.pos, p_Pos) < p_Range;
+}
+
+void SdkWorld::MoveBodyTo(uint64_t p_Id, ZActor* p_Actor, const coop::Transform& p_Xf, bool p_Hidden) {
+    if (!p_Actor || !m_InScene || !CanMoveBodies())
+        return;
+
+    // Being pulled already (the partner's drag): it ends where they say.
+    if (const auto s_It = m_MovedBodies.find(p_Id); s_It != m_MovedBodies.end() && s_It->second.actor == p_Actor) {
+        s_It->second.want = p_Xf;
+        return;
+    }
+
+    auto& s_Body = m_MovedBodies[p_Id];
+    s_Body = {};
+    s_Body.actor = p_Actor;
+    s_Body.want = p_Xf;
+    s_Body.stage = MovedBody::Settling;
+    s_Body.since = s_Body.progressAt = m_Now;
+    coop::Transform s_Was;
+    ActorTransform(p_Actor, s_Was);
+    s_Body.startOff = coop::Distance(s_Was.pos, p_Xf.pos);
+    s_Body.startPos = s_Was.pos;
+
+    // Moved out of sight only when nobody is near where it lies or where it goes (a body sliding
+    // across the floor by itself is no sight to see). Near a player it moves in plain view: hidden,
+    // it was a body that vanished in front of them (and stayed gone when the pull stalled).
+    if (p_Hidden && !SomeoneNear(s_Was.pos, 25.f) && !SomeoneNear(p_Xf.pos, 25.f)) {
+        s_Body.hiddenMove = true;
+        ZEntityRef s_Ref;
+        p_Actor->GetID(s_Ref);
+        s_Ref.SetProperty("m_bVisible", false);
+    }
+}
+
+void SdkWorld::ForgetMovedBody(uint64_t p_Id) {
+    const auto s_It = m_MovedBodies.find(p_Id);
+
+    if (s_It == m_MovedBodies.end())
+        return;
+
+    if (m_InScene && s_It->second.actor && s_It->second.hiddenMove) {
+        ZEntityRef s_Ref;
+        s_It->second.actor->GetID(s_Ref);
+        s_Ref.SetProperty("m_bVisible", true);
+    }
+
+    m_MovedBodies.erase(s_It);
+}
+
+void SdkWorld::UpdateMovedBodies() {
+    const float s_Dt = static_cast<float>(std::clamp(m_Now - m_LastBodyPull, 0.0, 0.1));
+    m_LastBodyPull = m_Now;
+
+    if (m_MovedBodies.empty())
+        return;
+
+    if (!m_InScene) {
+        m_MovedBodies.clear();
+        return;
+    }
+
+    std::vector<uint64_t> s_Done;
+    std::vector<std::pair<uint64_t, ZActor*>> s_Unseen;
+
+    for (auto& [s_Id, s_Body] : m_MovedBodies) {
+        ZActor* s_Actor = s_Body.actor;
+
+        // Gone from the scene, or not this actor any more.
+        if (!s_Actor || FindNpc(s_Id) != s_Actor) {
+            s_Done.push_back(s_Id);
+            continue;
+        }
+
+        // Our own 47 took it (dragging, dumping): the game's from here.
+        if (s_Actor != m_RemoteVictim && (s_Actor->m_bIsBeingDragged || s_Actor->m_bIsBeingDumped)) {
+            if (m_Trace)
+                m_Trace(std::string("body: ") + s_Actor->m_sActorName.c_str() + " taken by our 47");
+
+            s_Done.push_back(s_Id);
+            continue;
+        }
+
+        // The partner's stream stopped without a word: let go.
+        if (s_Body.stage == MovedBody::Held && m_Now - s_Body.lastHeld > 0.6)
+            LetGoBody(s_Id);
+
+        // A retry's wait over: pulled again.
+        if (s_Body.stage == MovedBody::Waiting && m_Now >= s_Body.since) {
+            s_Body.stage = MovedBody::Settling;
+            s_Body.since = s_Body.progressAt = m_Now;
+            s_Body.bestOff = 1e9f;
+            s_Body.hops = 0;
+        }
+
+        const float s_Off = PullBody(s_Body, s_Dt);
+        const float s_Speed = std::sqrt(s_Body.vel.x * s_Body.vel.x + s_Body.vel.y * s_Body.vel.y);
+
+        if (s_Body.stage == MovedBody::Waiting)
+            continue;
+
+        // Getting nearer, or caught: well off, no nearer for a second and standing still (not just
+        // slow to get going: a body at rest takes a moment, and an early hop in game lifted one onto
+        // a table), a short hop (up to 2 a try) frees it from a step's edge, a railing, a chair's leg.
+        if (s_Off < s_Body.bestOff - 0.1f) {
+            s_Body.bestOff = s_Off;
+            s_Body.progressAt = m_Now;
+        }
+        else if (m_Now - s_Body.since > 1.5 && m_Now - s_Body.progressAt > 1.0 && s_Off > 0.8f && s_Speed < 0.15f && s_Body.hops < 2 &&
+            m_Now >= s_Body.hopUntil + 1.0) {
+            s_Body.hopUntil = m_Now + 0.12;
+            s_Body.progressAt = m_Now;
+            ++s_Body.hops;
+            ++m_BodyHops;
+
+            if (m_Trace) {
+                char s_Text[160];
+                std::snprintf(s_Text, sizeof(s_Text), "body: %s caught %.1f m off, hop %d", s_Actor->m_sActorName.c_str(), s_Off, s_Body.hops);
+                m_Trace(s_Text);
+            }
+        }
+
+        if (s_Body.stage != MovedBody::Settling)
+            continue;
+
+        // Time to get there: longer for a longer way (a long drag let go of far behind the stream).
+        const double s_For = m_Now - s_Body.since;
+        const double s_Allowed = std::clamp(3.0 + 0.6 * s_Body.startOff, 3.0, 8.0);
+        const bool s_There = s_Off < 0.35f && s_Speed < 0.4f;
+        coop::Transform s_Now;
+        const bool s_Level = ActorTransform(s_Actor, s_Now) && std::fabs(s_Now.pos.z - s_Body.want.pos.z) < 0.5f;
+
+        // There and still (or near enough, on the right floor, when time is up): done.
+        if (s_There || (s_For > s_Allowed && s_Off < 1.25f && s_Level)) {
+            ++m_BodyMovesOk;
+            AgreeBody(s_Id, s_Actor);
+
+            if (m_Trace) {
+                char s_Text[240];
+                std::snprintf(s_Text, sizeof(s_Text), "body: %s lies where the partner left it (%.2f m off, pulled %.1f m, moved %.1f m, %d hops, try %d)",
+                    s_Actor->m_sActorName.c_str(), s_Off, s_Body.startOff, coop::Distance(s_Now.pos, s_Body.startPos), s_Body.hops, s_Body.tries + 1);
+                m_Trace(s_Text);
+            }
+
+            s_Done.push_back(s_Id);
+            continue;
+        }
+
+        if (s_For <= s_Allowed)
+            continue;
+
+        // Stalled: tried again a little later (it may have been caught on a door that opens, or
+        // under another body), twice. After that it stays where it is, in plain view: a body that
+        // vanished was worse than one a few metres off. Our AI doesn't see it then, so it raises no
+        // alarm the partner's game wouldn't.
+        if (s_Body.tries < 2) {
+            ++s_Body.tries;
+            ++m_BodyRetries;
+            s_Body.stage = MovedBody::Waiting;
+            s_Body.since = m_Now + 2.5;
+
+            if (m_Trace) {
+                char s_Text[200];
+                std::snprintf(s_Text, sizeof(s_Text), "body: %s stalled %.1f m off, trying again in 2.5 s", s_Actor->m_sActorName.c_str(), s_Off);
+                m_Trace(s_Text);
+            }
+
+            continue;
+        }
+
+        ++m_BodyMovesFailed;
+
+        if (m_Trace) {
+            char s_Text[220];
+            std::snprintf(s_Text, sizeof(s_Text), "body: %s couldn't be pulled there (%.1f m off of %.1f): left in view, unseen to our AI",
+                s_Actor->m_sActorName.c_str(), s_Off, s_Body.startOff);
+            m_Trace(s_Text);
+        }
+
+        AgreeBody(s_Id, s_Actor);
+        s_Unseen.emplace_back(s_Id, s_Actor);
+        s_Done.push_back(s_Id);
+    }
+
+    for (const uint64_t s_Id : s_Done) {
+        if (const auto s_It = m_MovedBodies.find(s_Id); s_It != m_MovedBodies.end()) {
+            if (FindNpc(s_Id) != s_It->second.actor)
+                m_MovedBodies.erase(s_It);
+            else
+                ForgetMovedBody(s_Id); // shown again if it was moved out of sight
+        }
+    }
+
+    for (const auto& [s_Id, s_Actor] : s_Unseen)
+        MakeBodyUnseen(s_Id, s_Actor);
+}
+
+void SdkWorld::MakeBodyUnseen(uint64_t p_Id, ZActor* p_Actor) {
+    auto& s_Body = m_Bodies[p_Id];
+    const auto s_Scene = Globals::Hitman5Module->m_pEntitySceneContext->m_pScene;
+
+    if (!p_Actor || !p_Actor->m_bEnabled || s_Body.unseen || !s_Scene)
+        return;
+
+    ZEntityRef s_Ref;
+    p_Actor->GetID(s_Ref);
+
+    if (ZEntityRef s_Unseen = SpawnQn(c_PartnerUnseenJson, "HitmanCoopBodyUnseen", s_Scene.m_entityRef, m_UnseenFactories)) {
+        if (s_Unseen.SetProperty("m_rActor", TEntityRef<ZActor>(s_Ref))) {
+            s_Unseen.GetEntity()->Activate(0);
+            m_BodyUnseen.push_back(s_Unseen);
+            s_Body.unseen = true;
+        }
+    }
+}
+
+void SdkWorld::HideBodyForPartner(uint64_t p_Id, ZActor* p_Actor, bool p_PutAway) {
+    // Hidden with the game's own flag for a body in a closet or a container, and out of sight.
+    // Players saw guards here still find a body hidden like that: so it is also taken out of the
+    // mission as the game does with a body put away (disabled: no physics, nothing to find), and,
+    // if it stays in, made unseen to the AI (the switch the stand-in has).
+    ZEntityRef s_Ref;
+    p_Actor->GetID(s_Ref);
+    p_Actor->m_bBodyHidden = true;
+    s_Ref.SetProperty("m_bVisible", false);
+    s_Ref.SignalInputPin(ZString("Disable"));
+
+    // Not pulled anywhere any more (a pull's end shows it again: a body back out of the bin).
+    if (const auto s_It = m_MovedBodies.find(p_Id); s_It != m_MovedBodies.end()) {
+        s_It->second.hiddenMove = false;
+        m_MovedBodies.erase(s_It);
+    }
+
+    AgreeBody(p_Id, p_Actor);
+    auto& s_Body = m_Bodies[p_Id];
+    s_Body.hidden = true;
+    s_Body.peerHidden = true;
+    p_Actor->m_bUnk38 = true;
+    p_Actor->m_bUnk39 = true;
+    p_Actor->m_bHasAIIcon = false;
+    p_Actor->m_bBlockDisguisePickup = true;
+    MakeBodyUnseen(p_Id, p_Actor);
+
+    if (m_Trace)
+        m_Trace(std::string("body: ") + p_Actor->m_sActorName.c_str() + (p_PutAway ? " put away" : " moved") + " by the partner, hidden here" +
+            (p_Actor->m_bEnabled ? ", still in the mission" : ", taken out of the mission") + (s_Body.unseen ? ", unseen to the AI" : ""));
+}
+
+std::string SdkWorld::DescribeMovedBodies() const {
+    static constexpr const char* c_Stages[] = { "held", "settling", "waiting to retry" };
+    std::string s_Out = std::to_string(m_MovedBodies.size()) + " being placed, " + std::to_string(m_BodyMovesOk) + " placed, " +
+        std::to_string(m_BodyMovesFailed) + " failed, " + std::to_string(m_BodyHops) + " hops, " + std::to_string(m_BodyRetries) + " retries" + (m_BodiesStuck ? " (bodies can't be moved in this game build: hidden instead)" : "") +
+        (!Functions::ZRagdollHandler_ApplyImpulseOnRagdoll->Exists() ? " (ragdoll push not found)" : "") + ", mode " + std::to_string(m_BodyMoveMode);
+
+    for (const auto& [s_Id, s_Body] : m_MovedBodies) {
+        coop::Transform s_Is;
+        const float s_Off = s_Body.actor && ActorTransform(s_Body.actor, s_Is) ? coop::Distance(s_Is.pos, s_Body.want.pos) : -1.f;
+        char s_Text[200];
+        std::snprintf(s_Text, sizeof(s_Text), " | %s: %s %.1f s, %.2f m off%s", s_Body.actor ? s_Body.actor->m_sActorName.c_str() : "?",
+            c_Stages[s_Body.stage], m_Now - s_Body.since, s_Off, s_Body.hiddenMove ? ", out of sight" : "");
+        s_Out += s_Text;
+    }
+
+    return s_Out;
+}
+
+// Test: "bodymove <x> <y> <z>" puts the nearest body there as the partner's word would (ragdoll
+// off, placed, ragdoll on, checked); "bodymove drag" follows our 47 1.2 m ahead for 3 s as a
+// partner's drag would (needs a frozen pose: its own); "bodymove mode <n>"; "bodymove" says how
+// they are.
+std::string SdkWorld::BodyMoveTest(const std::string& p_Arg) {
+    if (p_Arg.rfind("mode ", 0) == 0) {
+        SetBodyMoveMode(std::atoi(p_Arg.c_str() + 5));
+        return "bodymove: mode " + std::to_string(m_BodyMoveMode);
+    }
+
+    if (p_Arg.rfind("lever ", 0) == 0) {
+        m_PullLever = std::clamp(static_cast<float>(std::atof(p_Arg.c_str() + 6)), -0.5f, 1.f);
+        return "bodymove: pushes " + std::to_string(m_PullLever) + " m above the root";
+    }
+
+    if (p_Arg.rfind("bones ", 0) == 0) {
+        m_PullBoneCount = static_cast<uint32_t>(std::clamp(std::atoi(p_Arg.c_str() + 6), 1, static_cast<int>(c_PullBones)));
+        return "bodymove: pushes on " + std::to_string(m_PullBoneCount) + " bones";
+    }
+
+    if (p_Arg.empty())
+        return "bodymove: " + DescribeMovedBodies();
+
+    coop::Transform s_Local;
+
+    if (!GetLocalAvatar(s_Local))
+        return "bodymove: no 47";
+
+    ZActor* s_Best = nullptr;
+    uint64_t s_BestId = 0;
+    float s_BestD = 30.f;
+
+    for (const auto& [s_Id, s_Actor] : m_NpcsById) {
+        coop::Transform s_Xf;
+
+        if (s_Actor && ActorDown(s_Actor) && ActorTransform(s_Actor, s_Xf))
+            if (const float s_D = coop::Distance(s_Xf.pos, s_Local.pos); s_D < s_BestD) {
+                s_Best = s_Actor;
+                s_BestId = s_Id;
+                s_BestD = s_D;
+            }
+    }
+
+    if (!s_Best)
+        return "bodymove: no body within 30 m";
+
+    coop::Transform s_Was;
+    ActorTransform(s_Best, s_Was);
+
+    if (p_Arg == "drag") {
+        m_BodyDragTestId = s_BestId;
+        m_BodyDragTestUntil = m_Now + 3.0;
+        return std::string("bodymove: dragging ") + s_Best->m_sActorName.c_str() + " for 3 s";
+    }
+
+    coop::Transform s_To = s_Was;
+
+    // here: 1.5 m in front of our 47, on its floor (characters face -Y), out of sight as for the
+    // partner's word; pull: 3 m in front, in sight.
+    const bool s_Pull = p_Arg == "pull";
+
+    if (p_Arg == "here" || s_Pull)
+        s_To.pos = s_Local.pos + QRotate(s_Local.rot, { s_Pull ? 0.f : -1.6f, s_Pull ? -3.f : -1.2f, 0.f }); // (here: ahead and to the left)
+    else if (std::sscanf(p_Arg.c_str(), "%f %f %f", &s_To.pos.x, &s_To.pos.y, &s_To.pos.z) != 3)
+        return "bodymove: bodymove [x y z | here | pull | drag | mode n]";
+
+    MoveBodyTo(s_BestId, s_Best, s_To, !s_Pull);
+    char s_Text[220];
+    std::snprintf(s_Text, sizeof(s_Text), "bodymove: %s from (%.2f %.2f %.2f) to (%.2f %.2f %.2f): %s", s_Best->m_sActorName.c_str(), s_Was.pos.x,
+        s_Was.pos.y, s_Was.pos.z, s_To.pos.x, s_To.pos.y, s_To.pos.z, m_MovedBodies.count(s_BestId) ? "moving" : "can't move bodies");
+    return s_Text;
+}
+
+// Test: "bodyprobe <method> <metres>": tries one way of moving the nearest body that far ahead of
+// our 47 and logs where it really is, frame by frame. 0: its matrix set once; 1: ragdoll off, set
+// every frame, ragdoll on at frame 90; 2: physics impulses towards the place; 3: revived, placed,
+// put down again without a ragdoll, placed; 4: ragdoll off, a few frames' wait, set with the cached
+// matrix updated, ragdoll on at frame 90.
+std::string SdkWorld::BodyProbeStart(const std::string& p_Arg) {
+    int s_Method = 0;
+    float s_Metres = 3.f;
+    std::sscanf(p_Arg.c_str(), "%d %f", &s_Method, &s_Metres);
+    coop::Transform s_Local;
+
+    if (!GetLocalAvatar(s_Local))
+        return "bodyprobe: no 47";
+
+    ZActor* s_Best = nullptr;
+    uint64_t s_BestId = 0;
+    float s_BestD = 30.f;
+
+    for (const auto& [s_Id, s_Actor] : m_NpcsById) {
+        coop::Transform s_Xf;
+
+        if (s_Actor && ActorDown(s_Actor) && ActorTransform(s_Actor, s_Xf))
+            if (const float s_D = coop::Distance(s_Xf.pos, s_Local.pos); s_D < s_BestD) {
+                s_Best = s_Actor;
+                s_BestId = s_Id;
+                s_BestD = s_D;
+            }
+    }
+
+    if (!s_Best)
+        return "bodyprobe: no body within 30 m";
+
+    m_Probe = {};
+    m_Probe.id = s_BestId;
+    m_Probe.actor = s_Best;
+    m_Probe.method = s_Method;
+    ActorTransform(s_Best, m_Probe.from);
+    m_Probe.to = m_Probe.from;
+    m_Probe.to.pos = s_Local.pos + QRotate(s_Local.rot, { 0.f, -s_Metres, 0.f });
+    m_Probe.to.pos.z = m_Probe.from.pos.z;
+    m_Probe.active = true;
+
+    char s_Text[220];
+    std::snprintf(s_Text, sizeof(s_Text), "bodyprobe: method %d on %s from (%.2f %.2f %.2f) to (%.2f %.2f %.2f), %.2f m; ragdoll handler %p",
+        s_Method, s_Best->m_sActorName.c_str(), m_Probe.from.pos.x, m_Probe.from.pos.y, m_Probe.from.pos.z, m_Probe.to.pos.x, m_Probe.to.pos.y,
+        m_Probe.to.pos.z, coop::Distance(m_Probe.from.pos, m_Probe.to.pos), static_cast<void*>(s_Best->m_pRagdollHandler));
+    return s_Text;
+}
+
+void SdkWorld::UpdateBodyProbe() {
+    if (!m_Probe.active)
+        return;
+
+    ZActor* s_Actor = m_Probe.actor;
+
+    if (!m_InScene || FindNpc(m_Probe.id) != s_Actor) {
+        m_Probe.active = false;
+        return;
+    }
+
+    const int f = m_Probe.frame++;
+    ZEntityRef s_Ref;
+    s_Actor->GetID(s_Ref);
+    auto* s_Spatial = s_Ref.QueryInterface<ZSpatialEntity>();
+    auto* s_Character = static_cast<ZHM5BaseCharacter*>(s_Actor);
+
+    // Where it is now, before this frame's step.
+    coop::Transform s_Is;
+    ActorTransform(s_Actor, s_Is);
+
+    if (f == 1 || f == 2 || f == 5 || f == 10 || f == 30 || f == 60 || f == 89 || f == 92 || f == 100 || f == 120 || f == 150) {
+        char s_Text[240];
+        std::snprintf(s_Text, sizeof(s_Text), "bodyprobe: method %d frame %d: at (%.2f %.2f %.2f), %.2f m from where it lay, %.2f m from the target; dead=%d alive=%d",
+            m_Probe.method, f, s_Is.pos.x, s_Is.pos.y, s_Is.pos.z, coop::Distance(s_Is.pos, m_Probe.from.pos), coop::Distance(s_Is.pos, m_Probe.to.pos),
+            s_Actor->IsDead() ? 1 : 0, s_Actor->IsAlive() ? 1 : 0);
+
+        if (m_Trace)
+            m_Trace(s_Text);
+    }
+
+    const auto s_Set = [&] {
+        if (s_Spatial)
+            s_Spatial->SetObjectToWorldMatrixFromEditor(ToMatrix(m_Probe.to));
+    };
+
+    switch (m_Probe.method) {
+        case 0:
+            if (f == 0)
+                s_Set();
+            break;
+
+        case 1:
+            if (f == 0)
+                Functions::ZHM5BaseCharacter_DeactivateRagdoll->Call(s_Character);
+
+            if (f < 90)
+                s_Set();
+            else if (f == 90)
+                Functions::ZHM5BaseCharacter_ActivateRagdoll->Call(s_Character, false);
+
+            break;
+
+        case 2:
+            // A push towards the place on each of its first bones, every frame for a second.
+            if (f < 60 && s_Actor->m_pRagdollHandler && Functions::ZRagdollHandler_ApplyImpulseOnRagdoll->Exists()) {
+                coop::Vec3 s_Dir = m_Probe.to.pos - s_Is.pos;
+                const float s_Len = coop::Distance(m_Probe.to.pos, s_Is.pos);
+
+                if (s_Len > 0.2f) {
+                    s_Dir = { s_Dir.x / s_Len * 6.f, s_Dir.y / s_Len * 6.f, 1.5f };
+
+                    for (uint32_t b = 0; b < 12; ++b)
+                        Functions::ZRagdollHandler_ApplyImpulseOnRagdoll->Call(s_Actor->m_pRagdollHandler, float4(s_Is.pos.x, s_Is.pos.y, s_Is.pos.z + 0.3f, 1.f),
+                            float4(s_Dir.x, s_Dir.y, s_Dir.z, 0.f), b, false);
+                }
+            }
+
+            break;
+
+        case 3:
+            if (f == 0 && Functions::ZActor_ReviveActor->Exists())
+                Functions::ZActor_ReviveActor->Call(s_Actor);
+
+            if (f > 0 && f < 90)
+                s_Set();
+
+            if (f == 30)
+                KillForPartner(s_Actor, EDamageEvent::eDE_UNDEFINED, EDeathBehavior::eDB_NO_RAGDOLL);
+
+            break;
+
+        case 4:
+            if (f == 0)
+                Functions::ZHM5BaseCharacter_DeactivateRagdoll->Call(s_Character);
+
+            if (f >= 6 && f < 90) {
+                s_Set();
+
+                if (s_Spatial)
+                    Functions::ZSpatialEntity_UpdateCachedWorldMat->Call(s_Spatial);
+            }
+            else if (f == 90)
+                Functions::ZHM5BaseCharacter_ActivateRagdoll->Call(s_Character, false);
+
+            break;
+    }
+
+    if (f >= 150)
+        m_Probe.active = false;
+}
+
+// The drag test's frame: the body 1.2 m ahead of our 47, as a partner's stream would put it.
+void SdkWorld::UpdateBodyDragTest() {
+    if (!m_BodyDragTestId)
+        return;
+
+    ZActor* s_Actor = FindNpc(m_BodyDragTestId);
+    coop::Transform s_Local;
+
+    if (!s_Actor || m_Now > m_BodyDragTestUntil || !GetLocalAvatar(s_Local)) {
+        LetGoBody(m_BodyDragTestId);
+        m_BodyDragTestId = 0;
+        return;
+    }
+
+    // Characters face -Y.
+    coop::Transform s_Xf = s_Local;
+    s_Xf.pos = s_Local.pos + QRotate(s_Local.rot, { 1.5f, -2.5f, 0.f }); // (ahead and to the right: away from where "pull" leaves it)
+    HoldBody(m_BodyDragTestId, s_Actor, s_Xf);
+}
+
 void SdkWorld::CollectBodyChanges(std::vector<coop::ItemChange>& p_Out) {
     if (m_NpcsById.empty())
         return;
@@ -2736,7 +4014,30 @@ void SdkWorld::CollectBodyChanges(std::vector<coop::ItemChange>& p_Out) {
             s_Actor->m_bUnk38 = true; // close combat blocked
             s_Actor->m_bUnk39 = true; // drag blocked
             s_Actor->m_bHasAIIcon = false;
+            // And its clothes can't be taken: players were offered the outfit of a body the partner
+            // had put in a container, where it was last seen.
+            s_Actor->m_bBlockDisguisePickup = true;
         }
+
+        // Stripped, by whatever the game does to strip it (the outfit itself often stays as it
+        // was): told to the partner, unless it is their doing (see ApplyPeerBodyOutfit).
+        if (!s_Body.clothKnown) {
+            s_Body.clothKnown = true;
+            s_Body.cloth = s_Actor->m_bHasClothOutfit;
+        }
+        else if (s_Body.cloth && !s_Actor->m_bHasClothOutfit) {
+            s_Body.cloth = false;
+
+            if (const std::string s_Repo = s_Actor->m_rOutfit.m_pInterfaceRef ? OutfitKitToRepositoryId(s_Actor->m_rOutfit.m_pInterfaceRef) : std::string(); !s_Repo.empty()) {
+                Tell("Coop_BodyOutfit", std::to_string(s_Id) + " " + s_Repo + " " + std::to_string(s_Actor->m_nOutfitCharset) + " " +
+                    std::to_string(s_Actor->m_nOutfitVariation) + " 1");
+
+                if (m_Trace)
+                    m_Trace(std::string("body: ") + s_Actor->m_sActorName.c_str() + " stripped (seen by its clothes), told to the partner");
+            }
+        }
+        else if (!s_Body.cloth && s_Actor->m_bHasClothOutfit)
+            s_Body.cloth = true;
 
         // 47 took its clothes: it wears something else now, told to the partner (also told as the
         // game does it, see OnActorOutfitSet).
@@ -2748,8 +4049,8 @@ void SdkWorld::CollectBodyChanges(std::vector<coop::ItemChange>& p_Out) {
             const std::string s_Repo = s_Actor->m_rOutfit.m_pInterfaceRef ? OutfitKitToRepositoryId(s_Actor->m_rOutfit.m_pInterfaceRef) : std::string();
 
             if (!s_Repo.empty()) {
-                m_OutgoingEvents.emplace_back("Coop_BodyOutfit", std::to_string(s_Id) + " " + s_Repo + " " + std::to_string(s_Body.charset) + " " +
-                    std::to_string(s_Body.variation));
+                Tell("Coop_BodyOutfit", std::to_string(s_Id) + " " + s_Repo + " " + std::to_string(s_Body.charset) + " " +
+                    std::to_string(s_Body.variation) + (s_Actor->m_bHasClothOutfit ? " 0" : " 1"));
 
                 if (m_Trace)
                     m_Trace(std::string("body: ") + s_Actor->m_sActorName.c_str() + " now wears " + s_Repo + ", told to the partner");
@@ -2775,6 +4076,14 @@ void SdkWorld::CollectBodyChanges(std::vector<coop::ItemChange>& p_Out) {
 
         if (s_Actor->m_bIsBeingDragged || s_Actor->m_bIsBeingDumped)
             continue;
+
+        // Where it came to lie, once, when it fell in our game (not one we put down for the
+        // partner): theirs fell its own way, and may lie somewhere else (down stairs, say).
+        if (!s_Body.restTold && !s_Body.handled && !s_Body.hidden && !m_DownForPartner.count(s_Id) && !m_MovedBodies.count(s_Id) &&
+            m_Now - s_Body.stillSince > 1.0) {
+            s_Body.restTold = true;
+            p_Out.push_back({ s_Id, static_cast<uint8_t>(coop::ItemFlag_Body | coop::ItemFlag_Rest), s_Xf });
+        }
 
         const bool s_Hidden = s_Actor->m_bBodyHidden;
         // Dragged or dumped by our 47, more than a nudge, and at rest for a moment. A body sliding
@@ -2821,47 +4130,59 @@ void SdkWorld::ApplyPeerBody(const coop::ItemChange& p_Change) {
     if (!s_Actor || s_Actor == m_LocalVictim || !ActorDown(s_Actor) || s_Actor->m_bIsBeingDragged || s_Actor->m_bIsBeingDumped)
         return;
 
+    coop::Transform s_Ours;
+    const bool s_HaveOurs = ActorTransform(s_Actor, s_Ours);
+    const float s_Off = s_HaveOurs ? coop::Distance(s_Ours.pos, p_Change.xf.pos) : 0.f;
+
+    // Where it came to lie in the game it fell in. Ours is the partner's (put down here for them),
+    // and fell its own way (each PC's ragdoll does): far off, it goes where theirs lies.
+    if (p_Change.flags & coop::ItemFlag_Rest) {
+        auto& s_Body = m_Bodies[p_Change.id];
+
+        if (!m_DownForPartner.count(p_Change.id) || m_MovedBodies.count(p_Change.id) || s_Body.handled || s_Body.hidden || s_Body.peerHidden)
+            return;
+
+        const bool s_Move = s_Off > 1.5f && CanMoveBodies();
+
+        if (m_Trace) {
+            char s_Text[200];
+            std::snprintf(s_Text, sizeof(s_Text), "body: %s lies %.1f m from where it lies for the partner%s", s_Actor->m_sActorName.c_str(), s_Off,
+                s_Move ? ", moved there" : "");
+            m_Trace(s_Text);
+        }
+
+        if (s_Move)
+            MoveBodyTo(p_Change.id, s_Actor, p_Change.xf);
+
+        return;
+    }
+
     // At rest there: the partner has let go of it.
     if (s_Actor == m_RemoteVictim)
         ReleaseRemoteVictim();
 
-    // Hidden with the game's own flag for a body in a closet or a container, and out of sight.
-    // Players saw guards here still find a body hidden like that: so it is also taken out of the
-    // mission as the game does with a body put away (disabled: no physics, nothing to find), and,
-    // if it stays in, made unseen to the AI (the switch the stand-in has).
-    ZEntityRef s_Ref;
-    s_Actor->GetID(s_Ref);
-    s_Actor->m_bBodyHidden = true;
-    s_Ref.SetProperty("m_bVisible", false);
-    s_Ref.SignalInputPin(ZString("Disable"));
+    const bool s_PutAway = (p_Change.flags & coop::ItemFlag_BodyHidden) != 0;
 
-    AgreeBody(p_Change.id, s_Actor);
-    auto& s_Body = m_Bodies[p_Change.id];
-    s_Body.hidden = true;
-    s_Body.peerHidden = true;
-    s_Actor->m_bUnk38 = true;
-    s_Actor->m_bUnk39 = true;
-    s_Actor->m_bHasAIIcon = false;
+    // Dragged or dumped somewhere: ours goes there too (followed already if we saw the drag).
+    if (!s_PutAway && CanMoveBodies()) {
+        if (s_Off > 0.75f || m_MovedBodies.count(p_Change.id))
+            MoveBodyTo(p_Change.id, s_Actor, p_Change.xf);
 
-    const auto s_Scene = Globals::Hitman5Module->m_pEntitySceneContext->m_pScene;
+        auto& s_Body = m_Bodies[p_Change.id];
+        s_Body.agreed = s_Body.last = p_Change.xf.pos;
+        s_Body.stillSince = m_Now;
+        s_Body.handled = false;
 
-    if (s_Actor->m_bEnabled && !s_Body.unseen && s_Scene) {
-        if (ZEntityRef s_Unseen = SpawnQn(c_PartnerUnseenJson, "HitmanCoopBodyUnseen", s_Scene.m_entityRef, m_UnseenFactories)) {
-            if (s_Unseen.SetProperty("m_rActor", TEntityRef<ZActor>(s_Ref))) {
-                s_Unseen.GetEntity()->Activate(0);
-                m_BodyUnseen.push_back(s_Unseen);
-                s_Body.unseen = true;
-            }
+        if (m_Trace) {
+            char s_Text[200];
+            std::snprintf(s_Text, sizeof(s_Text), "body: %s moved by the partner, ours put there (%.1f m from where it lay)", s_Actor->m_sActorName.c_str(), s_Off);
+            m_Trace(s_Text);
         }
+
+        return;
     }
 
-    if (m_Trace)
-        m_Trace(std::string("body: ") + s_Actor->m_sActorName.c_str() + (s_Actor->m_bEnabled ? " still in the mission" : " taken out of the mission") +
-            (s_Body.unseen ? ", unseen to the AI" : ""));
-
-    if (m_Trace)
-        m_Trace(std::string("body: ") + s_Actor->m_sActorName.c_str() +
-            ((p_Change.flags & coop::ItemFlag_BodyHidden) ? " put away" : " moved") + " by the partner, hidden here");
+    HideBodyForPartner(p_Change.id, s_Actor, s_PutAway);
 }
 
 // 47 taking a body's clothes leaves its outfit as it was and sets it again "nude": the fields the
@@ -2887,12 +4208,21 @@ void SdkWorld::OnActorOutfitSet(ZActor* p_Actor, ZGlobalOutfitKit* p_Kit, int32_
     if (s_Repo.empty())
         return;
 
-    m_OutgoingEvents.emplace_back("Coop_BodyOutfit", std::to_string(s_Id) + " " + s_Repo + " " + std::to_string(p_Charset) + " " +
+    Tell("Coop_BodyOutfit", std::to_string(s_Id) + " " + s_Repo + " " + std::to_string(p_Charset) + " " +
         std::to_string(p_Variation) + " " + (p_Nude ? "1" : "0"));
 
     // The scan takes what it wears from here on, without telling it again.
-    if (const auto s_Body = m_Bodies.find(s_Id); s_Body != m_Bodies.end())
-        s_Body->second.outfitKnown = false;
+    auto [s_It, s_New] = m_Bodies.try_emplace(s_Id);
+    auto& s_Body = s_It->second;
+
+    if (s_New) {
+        s_Body.downAt = m_Now;
+        s_Body.hidden = p_Actor->m_bBodyHidden;
+    }
+
+    s_Body.outfitKnown = false;
+    s_Body.clothKnown = true;
+    s_Body.cloth = !p_Nude;
 
     if (m_Trace)
         m_Trace(std::string("body: ") + p_Actor->m_sActorName.c_str() + (p_Nude ? " stripped" : " dressed") + " in " + s_Repo + ", told to the partner");
@@ -2909,34 +4239,73 @@ void SdkWorld::ApplyPeerBodyOutfit(const std::string& p_Text) {
     if (!m_InScene)
         return;
 
+    // Not a body here yet (its knock-out on its way, or the scan hasn't listed it): tried again
+    // for a while. Players saw stripped bodies stay dressed for the partner.
+    if (!ApplyPeerBodyOutfitNow(p_Text) && m_PendingBodyOutfits.size() < 64)
+        m_PendingBodyOutfits.emplace_back(m_Now + 15.0, p_Text);
+}
+
+void SdkWorld::RetryPeerBodyOutfits() {
+    for (auto s_It = m_PendingBodyOutfits.begin(); s_It != m_PendingBodyOutfits.end();) {
+        if (m_Now > s_It->first || ApplyPeerBodyOutfitNow(s_It->second))
+            s_It = m_PendingBodyOutfits.erase(s_It);
+        else
+            ++s_It;
+    }
+}
+
+bool SdkWorld::ApplyPeerBodyOutfitNow(const std::string& p_Text) {
     std::istringstream s_In(p_Text);
     uint64_t s_Id = 0;
     std::string s_Repo;
     int32_t s_Charset = -1, s_Variation = -1, s_Nude = 0;
 
     if (!(s_In >> s_Id >> s_Repo >> s_Charset >> s_Variation))
-        return;
+        return true; // nothing to try again
 
     s_In >> s_Nude; // since 0.13.1: stripped to the underwear
 
-    ZActor* s_Actor = FindNpc(s_Id);
     const auto* s_Kit = FindOutfitKit(s_Repo);
 
-    if (!s_Actor || !ActorDown(s_Actor) || !s_Kit || !s_Kit->m_pInterfaceRef || s_Charset < 0 ||
-        static_cast<size_t>(s_Charset) >= s_Kit->m_pInterfaceRef->m_aCharSets.size() || s_Variation < 0)
-        return;
+    if (!s_Kit || !s_Kit->m_pInterfaceRef || s_Charset < 0 || static_cast<size_t>(s_Charset) >= s_Kit->m_pInterfaceRef->m_aCharSets.size() ||
+        s_Variation < 0)
+        return true; // never will be
+
+    ZActor* s_Actor = FindNpc(s_Id);
+
+    if (!s_Actor || !ActorDown(s_Actor))
+        return false;
+
+    // In that outfit already, as the partner has it: nothing to do.
+    if (s_Actor->m_rOutfit.m_pInterfaceRef == s_Kit->m_pInterfaceRef && s_Actor->m_nOutfitCharset == s_Charset &&
+        s_Actor->m_nOutfitVariation == s_Variation && s_Actor->m_bHasClothOutfit == (s_Nude == 0))
+        return true;
 
     m_ApplyingBodyOutfit = true;
     Functions::ZActor_SetOutfit->Call(s_Actor, *s_Kit, s_Charset, s_Variation, s_Nude != 0);
     m_ApplyingBodyOutfit = false;
 
-    // What it wears now is agreed: not told back.
-    auto& s_Body = m_Bodies[s_Id];
-    s_Body.downAt = s_Body.downAt > 0.0 ? s_Body.downAt : m_Now;
+    // What it wears now is agreed: not told back (neither its outfit nor its clothes).
+    auto [s_It, s_New] = m_Bodies.try_emplace(s_Id);
+    auto& s_Body = s_It->second;
+
+    if (s_New) {
+        s_Body.downAt = m_Now;
+        s_Body.hidden = s_Actor->m_bBodyHidden;
+    }
+
     RememberBodyOutfit(s_Body, s_Actor);
+    s_Body.clothKnown = true;
+    s_Body.cloth = s_Actor->m_bHasClothOutfit;
+
+    // Nothing left to take from it.
+    if (s_Nude)
+        s_Actor->m_bBlockDisguisePickup = true;
 
     if (m_Trace)
-        m_Trace(std::string("body: ") + s_Actor->m_sActorName.c_str() + " now wears " + s_Repo + ", as on the partner's screen");
+        m_Trace(std::string("body: ") + s_Actor->m_sActorName.c_str() + (s_Nude ? " stripped" : " now wears " + s_Repo) + ", as on the partner's screen");
+
+    return true;
 }
 
 std::string SdkWorld::BodyTest(const std::string& p_Arg) {
@@ -3030,25 +4399,39 @@ std::string SdkWorld::BodyTest(const std::string& p_Arg) {
 }
 
 namespace {
-// Our 47's item in hand: of the items it owns, the one being drawn. Items in its pockets are owned
-// but not drawn (their geometry hidden).
-ZHM5Item* HeldBy(const Owner47& p_Owner, ZEntityRef* p_Ref = nullptr) {
-    ZHM5Item* s_Held = nullptr;
+// Drawn: its geometry shown (items in 47's pockets are owned but not drawn). Some items are drawn
+// through their other geometry reference.
+bool ItemDrawn(const ZHM5Item* p_Item) {
+    if (p_Item->m_rGeomentity.m_entityRef)
+        return p_Item->m_rGeomentity.m_entityRef.GetProperty<bool>("m_bVisible").Get();
 
-    ForEachSceneItem([&](uint64_t, ZHM5Item* p_Item, const ZEntityRef& p_ItemRef) {
-        if (s_Held || !p_Owner.Has(p_Item->m_pOwner) || !p_Item->m_rGeomentity.m_entityRef || !p_Item->m_pItemConfigDescriptor)
-            return;
+    if (p_Item->m_pGeomEntity.m_entityRef)
+        return p_Item->m_pGeomEntity.m_entityRef.GetProperty<bool>("m_bVisible").Get();
 
-        if (p_Item->m_rGeomentity.m_entityRef.GetProperty<bool>("m_bVisible").Get()) {
-            s_Held = p_Item;
-
-            if (p_Ref)
-                *p_Ref = p_ItemRef;
-        }
-    });
-
-    return s_Held;
+    return false;
 }
+
+// Where an item is, in our 47's own frame: x to its right, y behind it (characters face -Y), z up.
+coop::Vec3 InFrameOf(const coop::Transform& p_Of, const coop::Vec3& p_At) {
+    const coop::Quat s_Inv = { -p_Of.rot.x, -p_Of.rot.y, -p_Of.rot.z, p_Of.rot.w };
+    return QRotate(s_Inv, p_At - p_Of.pos);
+}
+
+// Slung on 47's back (a rifle, a shotgun): behind its spine and above its hips. Held (in a hand,
+// raised or lowered), it is at its side or in front. Both are drawn, and the one drawn first was
+// taken for the held one: the stand-in held the wrong gun (a Bartoli 12G showed as a Fusil G2).
+bool OnBack(const coop::Vec3& p_Local) {
+    return p_Local.y > 0.07f && p_Local.z > 0.55f && std::fabs(p_Local.x) < 0.4f;
+}
+}
+
+std::string SdkWorld::ItemRepository(const ZHM5Item* p_Item) const {
+    if (!p_Item || !p_Item->m_pItemConfigDescriptor)
+        return {};
+
+    const ZString s_Id = p_Item->m_pItemConfigDescriptor->m_ItemID.ToString();
+    std::string s_Text(s_Id.c_str(), s_Id.size());
+    return s_Text == "00000000-0000-0000-0000-000000000000" ? std::string() : s_Text;
 }
 
 std::string SdkWorld::LocalHeldItem() const {
@@ -3058,12 +4441,52 @@ std::string SdkWorld::LocalHeldItem() const {
 
     m_HeldCheckAt = m_Now + 0.25;
     m_HeldItem.clear();
-    const auto s_Player = SDK()->GetLocalPlayer();
+    m_BackItem.clear();
+    coop::Transform s_Local;
 
-    if (m_InScene && s_Player)
-        if (const ZHM5Item* s_Item = HeldBy(Owner47()))
-            m_HeldItem = s_Item->m_pItemConfigDescriptor->m_ItemID.ToString().c_str();
+    if (!m_InScene || !GetLocalAvatar(s_Local))
+        return m_HeldItem;
 
+    const Owner47 s_Owner;
+
+    if (s_Owner.refs.empty())
+        return m_HeldItem;
+
+    // Every drawn item of ours (placed or not, whatever its id): one on the back, one in hand.
+    float s_BestHand = 1e9f;
+
+    ForEachItem([&](uint64_t, ZHM5Item* p_Item, const ZEntityRef& p_Ref) {
+        if (!s_Owner.Has(p_Item->m_pOwner) || !p_Item->m_pItemConfigDescriptor || !ItemDrawn(p_Item))
+            return;
+
+        const auto* s_Spatial = p_Ref.QueryInterface<ZSpatialEntity>();
+
+        if (!s_Spatial)
+            return;
+
+        const coop::Vec3 s_At = InFrameOf(s_Local, ToTransform(s_Spatial->GetObjectToWorldMatrix()).pos);
+        const std::string s_Repo = ItemRepository(p_Item);
+
+        if (s_Repo.empty())
+            return;
+
+        if (OnBack(s_At)) {
+            if (m_BackItem.empty())
+                m_BackItem = s_Repo;
+
+            return;
+        }
+
+        // Two in hand (a rare frame mid-swap): the one furthest out in front.
+        const float s_Score = s_At.y;
+
+        if (s_Score < s_BestHand) {
+            s_BestHand = s_Score;
+            m_HeldItem = s_Repo;
+        }
+    }, true);
+
+    // Drawn on the back and nothing else: on the back it is.
     return m_HeldItem;
 }
 
@@ -3078,63 +4501,75 @@ std::string SdkWorld::HeldItemsTest() const {
     int s_Count = 0;
     const Owner47 s_Owner;
 
-    ForEachSceneItem([&](uint64_t p_Id, ZHM5Item* p_Item, const ZEntityRef& p_Ref) {
+    ForEachItem([&](uint64_t p_Id, ZHM5Item* p_Item, const ZEntityRef& p_Ref) {
         if (!s_Owner.Has(p_Item->m_pOwner))
             return;
 
         const auto* s_Spatial = p_Ref.QueryInterface<ZSpatialEntity>();
         const coop::Transform s_Xf = s_Spatial ? ToTransform(s_Spatial->GetObjectToWorldMatrix()) : coop::Transform {};
-        const bool s_Geom = p_Item->m_rGeomentity.m_entityRef && p_Item->m_rGeomentity.m_entityRef.GetProperty<bool>("m_bVisible").Get();
+        const coop::Vec3 s_At = InFrameOf(s_Local, s_Xf.pos);
         const bool s_Visible = p_Item->m_rItemVisible.m_entityRef && p_Item->m_rItemVisible.m_entityRef.GetProperty<bool>("m_bValue").Get();
-        char s_Line[320];
-        std::snprintf(s_Line, sizeof(s_Line), " | %s [%s] geom=%d visible=%d at %.2f m (dz %.2f)",
+        char s_Line[360];
+        std::snprintf(s_Line, sizeof(s_Line), " | %s [%s] drawn=%d visible=%d at x%.2f y%.2f z%.2f%s",
             p_Item->m_pItemConfigDescriptor ? p_Item->m_pItemConfigDescriptor->m_sTitle.c_str() : "?",
-            p_Item->m_pItemConfigDescriptor ? p_Item->m_pItemConfigDescriptor->m_ItemID.ToString().c_str() : "?", s_Geom ? 1 : 0,
-            s_Visible ? 1 : 0, coop::Distance(s_Xf.pos, s_Local.pos), s_Xf.pos.z - s_Local.pos.z);
+            p_Item->m_pItemConfigDescriptor ? p_Item->m_pItemConfigDescriptor->m_ItemID.ToString().c_str() : "?", ItemDrawn(p_Item) ? 1 : 0,
+            s_Visible ? 1 : 0, s_At.x, s_At.y, s_At.z, OnBack(s_At) ? " (back)" : "");
         s_Out += s_Line;
         ++s_Count;
-    });
+    }, true);
 
-    return "held: " + std::to_string(s_Count) + " owned, in hand [" + LocalHeldItem() + "]" + s_Out;
+    m_HeldCheckAt = 0.0;
+    const std::string s_Held = LocalHeldItem();
+    return "held: " + std::to_string(s_Count) + " owned, in hand [" + s_Held + "], on back [" + m_BackItem + "]" + s_Out;
 }
 
 void SdkWorld::SetPartnerHeldItem(const std::string& p_RepositoryId) {
-    m_StandInItemWanted = p_RepositoryId;
+    m_HandSlot.wanted = p_RepositoryId;
 }
 
-void SdkWorld::DropStandInItem() {
-    if (m_StandInItem && m_PartnerActor) {
-        m_PartnerActor->ReleaseItem(m_StandInItem, false);
-        Functions::ZWorldInventory_DestroyItem->Call(Globals::WorldInventory, TEntityRef<IItemBase>(m_StandInItem.m_entityRef));
+void SdkWorld::DropStandInItem(StandInSlot& p_Slot) {
+    if (p_Slot.item && m_PartnerActor) {
+        m_PartnerActor->ReleaseItem(p_Slot.item, false);
+        Functions::ZWorldInventory_DestroyItem->Call(Globals::WorldInventory, TEntityRef<IItemBase>(p_Slot.item.m_entityRef));
 
         if (m_Trace)
-            m_Trace("held item: " + m_StandInItemShown + " taken from the stand-in's hand");
+            m_Trace("held item: " + p_Slot.shown + " taken from the stand-in");
     }
 
-    m_StandInItem = {};
-    m_StandInItemShown.clear();
+    p_Slot.item = {};
+    p_Slot.shown.clear();
 }
 
 void SdkWorld::UpdateStandInItem() {
     if (!m_InScene || !m_PartnerActor || !m_PartnerActor->m_pInventoryHandler || !Globals::WorldInventory)
         return;
 
-    // Hidden (out of the mission, or far off): nothing in its hands to give away.
-    const std::string s_Want = m_PartnerHidden ? std::string() : m_StandInItemWanted;
+    UpdateStandInSlot(m_HandSlot, "hand");
+    UpdateStandInSlot(m_BackSlot, "back");
+}
 
-    // Asked for already: the copy is on its way (a few frames while its resource loads).
-    if (m_StandInItemTicket && m_Now - m_StandInItemAskedAt < 5.0)
+void SdkWorld::UpdateStandInSlot(StandInSlot& p_Slot, const char* p_Where) {
+    // Hidden (out of the mission, or far off): nothing to give away. The same item in hand and on
+    // the back (a frame mid-draw): only in hand.
+    std::string s_Want = m_PartnerHidden ? std::string() : p_Slot.wanted;
+
+    if (&p_Slot == &m_BackSlot && s_Want == m_HandSlot.wanted)
+        s_Want.clear();
+
+    // Asked for already: the copy is on its way (a few frames while its resource loads). One that
+    // never came in 5 s is let go of (its late answer is ignored, see OnStandInItemCreated).
+    if (p_Slot.ticket && m_Now - p_Slot.askedAt < 5.0)
         return;
 
-    m_StandInItemTicket = 0;
+    p_Slot.ticket = 0;
 
-    if (s_Want == m_StandInItemShown)
+    if (s_Want == p_Slot.shown && (s_Want.empty() || p_Slot.item))
         return;
 
-    DropStandInItem();
+    DropStandInItem(p_Slot);
 
     // An item the game can't make here (not in this mission's resources) is tried again later.
-    if (s_Want.empty() || m_Now - m_StandInItemFailedAt < 10.0)
+    if (s_Want.empty() || (s_Want == p_Slot.failedFor && m_Now - p_Slot.failedAt < 10.0))
         return;
 
     ZEntityRef s_ActorRef = m_PartnerActor->m_pInventoryHandler->m_rActor.m_entityRef;
@@ -3149,7 +4584,9 @@ void SdkWorld::UpdateStandInItem() {
         s_Delegate, s_NewId, false, {}, s_ActorRef);
 
     if (s_Ticket == *Globals::WorldInventory_InvalidTicket) {
-        m_StandInItemFailedAt = m_Now;
+        p_Slot.failedAt = m_Now;
+        p_Slot.failedFor = s_Want;
+        p_Slot.shown.clear();
 
         if (m_Trace)
             m_Trace("held item: " + s_Want + " can't be made here");
@@ -3159,42 +4596,49 @@ void SdkWorld::UpdateStandInItem() {
 
     ZActorInventoryHandler::SPendingItemInfo s_Pending;
     s_Pending.m_nTicket = s_Ticket;
-    s_Pending.m_eAttachLocation = static_cast<EAttachLocation>(m_StandInAttach);
+    s_Pending.m_eAttachLocation = static_cast<EAttachLocation>(p_Slot.attach);
     s_Pending.m_eMaxTension = EGameTension::EGT_Undefined;
     s_Pending.m_bLeftHand = false;
-    s_Pending.m_bWeapon = m_StandInWeapon;
+    s_Pending.m_bWeapon = p_Slot.weapon;
     m_PartnerActor->m_pInventoryHandler->m_aPendingItems.push_back(s_Pending);
 
-    m_StandInItemTicket = s_Ticket;
-    m_StandInItemAskedAt = m_Now;
-    m_StandInItemShown = s_Want;
+    p_Slot.ticket = s_Ticket;
+    p_Slot.askedAt = m_Now;
+    p_Slot.shown = s_Want;
 
     if (m_Trace)
-        m_Trace("held item: asked for " + s_Want);
+        m_Trace(std::string("held item: asked for ") + s_Want + " (" + p_Where + ")");
 }
 
 void SdkWorld::OnStandInItemCreated(uint32_t p_Ticket, TEntityRef<IItemBase> p_Item) {
-    if (!m_PartnerActor || !m_PartnerActor->m_pInventoryHandler || p_Ticket != m_StandInItemTicket)
+    StandInSlot* s_Slot = p_Ticket == m_HandSlot.ticket ? &m_HandSlot : p_Ticket == m_BackSlot.ticket ? &m_BackSlot : nullptr;
+
+    if (!m_PartnerActor || !m_PartnerActor->m_pInventoryHandler || !p_Ticket || !s_Slot) {
+        // Given up on (or the stand-in gone): not left lying at the world's origin.
+        if (p_Item.m_entityRef && Globals::WorldInventory)
+            Functions::ZWorldInventory_DestroyItem->Call(Globals::WorldInventory, p_Item);
+
         return;
+    }
 
     for (auto& s_Pending : m_PartnerActor->m_pInventoryHandler->m_aPendingItems) {
         if (s_Pending.m_nTicket == p_Ticket) {
             s_Pending.m_rItem = TEntityRef<IItem>(p_Item.m_entityRef);
-            m_StandInItem = s_Pending.m_rItem;
+            s_Slot->item = s_Pending.m_rItem;
             break;
         }
     }
 
     Functions::ZActorInventoryHandler_FinalizePendingItems->Call(m_PartnerActor->m_pInventoryHandler);
-    m_StandInItemTicket = 0;
+    s_Slot->ticket = 0;
 
-    // Never picked up from its hands, by our 47 or anyone.
+    // Never picked up from it, by our 47 or anyone, and never taken for one of the level's items.
     if (auto* s_Item = p_Item.m_entityRef.QueryInterface<ZHM5Item>())
         if (s_Item->m_rItemPickupEnabled.m_entityRef)
             s_Item->m_rItemPickupEnabled.m_entityRef.SetProperty("m_bValue", false);
 
     if (m_Trace)
-        m_Trace("held item: " + m_StandInItemShown + " in the stand-in's hand");
+        m_Trace("held item: " + s_Slot->shown + (s_Slot == &m_BackSlot ? " on the stand-in's back" : " in the stand-in's hand"));
 }
 
 std::string SdkWorld::StandInItemTest(const std::string& p_Arg) {
@@ -3207,21 +4651,26 @@ std::string SdkWorld::StandInItemTest(const std::string& p_Arg) {
 
     if (s_What == "mine") {
         const auto s_Player = SDK()->GetLocalPlayer();
+        const Owner47 s_Owner;
         s_What.clear();
 
-        ForEachSceneItem([&](uint64_t, ZHM5Item* p_Item, const ZEntityRef&) {
-            if (s_What.empty() && s_Player && Owner47().Has(p_Item->m_pOwner) && p_Item->m_pItemConfigDescriptor)
-                s_What = p_Item->m_pItemConfigDescriptor->m_ItemID.ToString().c_str();
-        });
+        ForEachItem([&](uint64_t, ZHM5Item* p_Item, const ZEntityRef&) {
+            if (s_What.empty() && s_Player && s_Owner.Has(p_Item->m_pOwner) && p_Item->m_pItemConfigDescriptor)
+                s_What = ItemRepository(p_Item);
+        }, true);
     }
 
     if (s_What == "off")
         s_What.clear();
 
-    DropStandInItem();
-    m_StandInItemTicket = 0;
-    m_StandInItemFailedAt = -100.0;
-    SetPartnerHeldItem(s_What);
+    // Attach 3 (the back) goes to the back slot, as the partner's back item does.
+    StandInSlot& s_Slot = m_StandInAttach == 3 ? m_BackSlot : m_HandSlot;
+    DropStandInItem(s_Slot);
+    s_Slot.ticket = 0;
+    s_Slot.failedAt = -100.0;
+    s_Slot.attach = m_StandInAttach;
+    s_Slot.weapon = m_StandInWeapon;
+    s_Slot.wanted = s_What;
     return "standinitem: attach " + std::to_string(m_StandInAttach) + " weapon " + std::to_string(s_Weapon) + " [" + s_What + "]";
 }
 
@@ -3312,6 +4761,9 @@ bool ReadDoorOpen(const ZEntityRef& p_Door, bool& p_Open) {
 void SdkWorld::FindDoors() {
     m_Doors.clear();
     m_DoorsFound = true;
+    m_ItemKeys.clear();
+    m_SceneItemKeys.clear();
+    m_ItemKeysReady = true; // (also without a type registry: items then go by their own ids)
 
     if (!*Globals::TypeRegistry)
         return;
@@ -3319,8 +4771,20 @@ void SdkWorld::FindDoors() {
     const STypeID* s_Single = (*Globals::TypeRegistry)->GetTypeID(ZString("ZHM5SingleDoor2"));
     const STypeID* s_Double = (*Globals::TypeRegistry)->GetTypeID(ZString("ZHM5DoubleDoor2"));
 
-    if (!s_Single && !s_Double)
-        return;
+    // The level's items, and the spawners that made them: their places in the scene key the items.
+    std::unordered_map<const void*, std::vector<std::pair<const void*, uint64_t>>> s_BySpawner; // spawner -> (item, own id)
+    std::unordered_set<const void*> s_ItemObjects;
+    const ItemList s_Items = WorldItems();
+
+    for (auto* s_Entry = s_Items.begin; s_Items.begin && s_Entry != s_Items.end; ++s_Entry) {
+        if (!ItemUsable(*s_Entry))
+            continue;
+
+        s_ItemObjects.insert(s_Entry->m_entityRef.m_pObj);
+
+        if (const auto* s_Item = s_Entry->m_entityRef.QueryInterface<ZHM5Item>(); s_Item && s_Item->m_rSpawner.m_pObj)
+            s_BySpawner[s_Item->m_rSpawner.m_pObj].emplace_back(s_Entry->m_entityRef.m_pObj, s_Entry->m_entityRef->GetType()->m_nEntityID);
+    }
 
     LARGE_INTEGER s_Start, s_End, s_Freq;
     QueryPerformanceCounter(&s_Start);
@@ -3328,6 +4792,21 @@ void SdkWorld::FindDoors() {
     ForEachSceneEntity([&](uint64_t p_Key, const ZEntityRef& p_Ref) {
         if ((s_Single && p_Ref.QueryInterface(s_Single)) || (s_Double && p_Ref.QueryInterface(s_Double)))
             m_Doors[p_Key] = { p_Ref, false, false };
+
+        if (const auto s_It = s_BySpawner.find(p_Ref.m_pObj); s_It != s_BySpawner.end()) {
+            for (const auto& [s_Object, s_OwnId] : s_It->second) {
+                if (!m_ItemKeys.contains(s_Object)) {
+                    const uint64_t s_Key = Mix(p_Key, s_OwnId) | 1; // never 0
+                    m_ItemKeys[s_Object] = s_Key;
+                    m_SceneItemKeys.insert(s_Key);
+                }
+            }
+        }
+        else if (s_ItemObjects.contains(p_Ref.m_pObj) && !m_ItemKeys.contains(p_Ref.m_pObj)) {
+            const uint64_t s_Key = Mix(p_Key, 0x17E3) | 1;
+            m_ItemKeys[p_Ref.m_pObj] = s_Key;
+            m_SceneItemKeys.insert(s_Key);
+        }
     });
 
     for (auto& [s_Key, s_Door] : m_Doors)
@@ -3337,7 +4816,8 @@ void SdkWorld::FindDoors() {
     QueryPerformanceFrequency(&s_Freq);
 
     if (m_Trace)
-        m_Trace("doors: " + std::to_string(m_Doors.size()) + " found in " +
+        m_Trace("doors: " + std::to_string(m_Doors.size()) + " found, and " + std::to_string(m_ItemKeys.size()) + " of " +
+            std::to_string(s_ItemObjects.size()) + " items placed in the scene, in " +
             std::to_string(static_cast<int>((s_End.QuadPart - s_Start.QuadPart) * 1000 / s_Freq.QuadPart)) + " ms");
 }
 
@@ -3584,7 +5064,7 @@ std::string SdkWorld::ItemOwnersTest() const {
     std::string s_Out = "items: 47's parts " + std::to_string(s_Owner.refs.size());
     int s_Total = 0, s_Owned = 0, s_Listed = 0;
 
-    ForEachSceneItem([&](uint64_t, ZHM5Item* p_Item, const ZEntityRef&) {
+    ForEachItem([&](uint64_t, ZHM5Item* p_Item, const ZEntityRef&) {
         ++s_Total;
 
         if (!p_Item->m_pOwner)
@@ -3637,7 +5117,7 @@ std::string SdkWorld::ItemTest(bool p_Take) {
     uint64_t s_BestId = 0;
     std::string s_Name;
 
-    ForEachSceneItem([&](uint64_t p_Id, ZHM5Item* p_Item, const ZEntityRef& p_Ref) {
+    ForEachItem([&](uint64_t p_Id, ZHM5Item* p_Item, const ZEntityRef& p_Ref) {
         const auto* s_Spatial = p_Ref.QueryInterface<ZSpatialEntity>();
 
         if (!s_Spatial || p_Item->m_pOwner)
@@ -3685,6 +5165,10 @@ void SdkWorld::OnPeerMissionEvent(const std::string& p_Name, const std::string& 
         NotifyAs(ToastKind::Partner, m_PartnerName + " completed a challenge: " + coop::GameEvents::PlainText(p_Json, 60) + ".");
     else if (p_Name == "Coop_BodyOutfit")
         ApplyPeerBodyOutfit(p_Json);
+    else if (p_Name == "Coop_BackItem")
+        SetPartnerBackItem(p_Json == "-" ? std::string() : p_Json.substr(0, 64));
+    else if (p_Name == "Coop_ItemSpawn")
+        ApplyPeerItemSpawn(p_Json);
     else if (p_Name == "Coop_Ping") {
         Pulse();
         NotifyAs(ToastKind::Partner, m_PartnerName + " is looking for you: follow the arrow.");
@@ -3697,6 +5181,17 @@ void SdkWorld::OnPeerMissionEvent(const std::string& p_Name, const std::string& 
         NotifyAs(ToastKind::Warning, m_PartnerName + "'s mission failed.");
     else
         Logger::Debug("[HitmanCoop] Partner event {}: {}", p_Name, p_Json);
+}
+
+void SdkWorld::Tell(const char* p_Name, std::string p_Text) {
+    if (m_OutgoingEvents.size() >= 256)
+        m_OutgoingEvents.erase(m_OutgoingEvents.begin());
+
+    // The partner's back item is told again every 10 s: only the newest is worth keeping.
+    if (std::strcmp(p_Name, "Coop_BackItem") == 0)
+        std::erase_if(m_OutgoingEvents, [](const auto& p_Event) { return p_Event.first == "Coop_BackItem"; });
+
+    m_OutgoingEvents.emplace_back(p_Name, std::move(p_Text));
 }
 
 void SdkWorld::Notify(const std::string& p_Text) {

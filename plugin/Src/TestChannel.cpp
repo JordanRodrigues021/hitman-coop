@@ -1,5 +1,7 @@
 #include "TestChannel.h"
 
+#include "Log.h"
+
 #include <Windows.h>
 
 #include <cstdio>
@@ -55,14 +57,22 @@ void TestChannel::WriteStatus(const std::string& p_Json) {
 }
 
 void TestChannel::Trace(const std::string& p_Line) {
+    CoopLog::Tagged(coop::LogLevel::Debug, p_Line);
+}
+
+void TestChannel::Raw(const std::string& p_Line) {
     if (!Enabled())
         return;
 
-    std::ofstream s_File(m_Path + ".trace", std::ios::app);
+    // From any thread (the log's mirror): one file, kept open, a line at a time.
+    std::lock_guard s_Lock(m_TraceMutex);
+
+    if (!m_TraceFile.is_open())
+        m_TraceFile.open(m_Path + ".trace", std::ios::app);
 
     // Milliseconds since start, to line trace lines up with a video.
-    if (s_File)
-        s_File << '[' << GetTickCount64() % 10000000 << "] " << p_Line << '\n';
+    if (m_TraceFile)
+        m_TraceFile << '[' << GetTickCount64() % 10000000 << "] " << p_Line << std::endl;
 }
 
 std::string TestChannel::Escape(const std::string& p_Text) {
